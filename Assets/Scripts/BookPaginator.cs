@@ -1,131 +1,511 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Text;
 using System.Text.RegularExpressions;
+using TMPro;
+using UnityEngine;
 
 /// <summary>
-/// EPUBから抽出した本文を、決定的な規則でページへ分割します。
-/// UnityのGameObjectに依存しないため、単体テストしやすいクラスです。
+/// TextMeshProの実際の表示領域を測定し、本文をページ単位へ分割します。
+/// 左右ページのTextMeshProを交互に使用するため、左右で表示領域が異なる場合も
+/// それぞれの領域に収まる位置で分割されます。
 /// </summary>
 public static class BookPaginator
 {
+    private static readonly HashSet<string>
+        ProhibitedPageStartCharacters =
+            new HashSet<string>(StringComparer.Ordinal)
+            {
+                "、", "。", "，", "．", "・",
+                "：", "；", "！", "？",
+                "）", "〕", "］", "｝",
+                "〉", "》", "」", "』", "】",
+                "〙", "〗", "〟",
+                "’", "”", "｠", "»",
+                "ぁ", "ぃ", "ぅ", "ぇ", "ぉ",
+                "っ", "ゃ", "ゅ", "ょ", "ゎ",
+                "ァ", "ィ", "ゥ", "ェ", "ォ",
+                "ッ", "ャ", "ュ", "ョ", "ヮ",
+                "ヵ", "ヶ",
+                "ー", "〜", "～", "…", "‥",
+                "ヽ", "ヾ", "ゝ", "ゞ", "々",
+                "％", "%", "℃", "°"
+            };
+
+    private static readonly HashSet<string>
+        ProhibitedPageEndCharacters =
+            new HashSet<string>(StringComparer.Ordinal)
+            {
+                "（", "〔", "［", "｛",
+                "〈", "《", "「", "『", "【",
+                "〘", "〖", "〝",
+                "‘", "“", "｟", "«"
+            };
+
     public static List<string> Paginate(
         string sourceText,
-        int charactersPerLine,
-        int linesPerPage
+        TMP_Text leftPageTextComponent,
+        TMP_Text rightPageTextComponent
     )
     {
-        if (charactersPerLine <= 0)
+        if (leftPageTextComponent == null)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(charactersPerLine),
-                "1行の文字数は1以上である必要があります。"
+            throw new ArgumentNullException(
+                nameof(leftPageTextComponent)
             );
         }
 
-        if (linesPerPage <= 0)
+        if (rightPageTextComponent == null)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(linesPerPage),
-                "1ページの行数は1以上である必要があります。"
+            throw new ArgumentNullException(
+                nameof(rightPageTextComponent)
             );
         }
 
-        List<string> pages = new List<string>();
+        ValidateMeasurementComponent(
+            leftPageTextComponent,
+            "左ページ"
+        );
+
+        ValidateMeasurementComponent(
+            rightPageTextComponent,
+            "右ページ"
+        );
+
+        List<string> pages =
+            new List<string>();
 
         if (string.IsNullOrWhiteSpace(sourceText))
         {
             return pages;
         }
 
-        string normalizedText = NormalizeText(sourceText);
-        TextElementEnumerator enumerator =
-            StringInfo.GetTextElementEnumerator(normalizedText);
+        string normalizedText =
+            NormalizeText(sourceText);
 
-        List<string> pageLines = new List<string>(linesPerPage);
-        StringBuilder currentLine = new StringBuilder();
-        int currentLineElementCount = 0;
-        bool previousElementWasSpace = false;
+        int sourceIndex = 0;
+        int pageIndex = 0;
+        int safetyCounter = 0;
 
-        while (enumerator.MoveNext())
+        while (sourceIndex < normalizedText.Length)
         {
-            string element = enumerator.GetTextElement();
-
-            if (element == "\r")
-            {
-                continue;
-            }
-
-            if (element == "\n")
-            {
-                CommitLine(
-                    currentLine,
-                    ref currentLineElementCount,
-                    pageLines,
-                    pages,
-                    linesPerPage,
-                    allowEmptyLine: true
+            sourceIndex =
+                SkipAsciiBoundaryWhitespace(
+                    normalizedText,
+                    sourceIndex
                 );
 
-                previousElementWasSpace = false;
-                continue;
+            if (sourceIndex >= normalizedText.Length)
+            {
+                break;
             }
 
-            if (string.IsNullOrWhiteSpace(element))
+            TMP_Text measurementComponent =
+                pageIndex % 2 == 0
+                    ? leftPageTextComponent
+                    : rightPageTextComponent;
+
+            string remainingText =
+                normalizedText.Substring(sourceIndex);
+
+            int pageLength =
+                MeasurePageLength(
+                    remainingText,
+                    measurementComponent
+                );
+
+            pageLength =
+                AlignToTextElementBoundary(
+                    remainingText,
+                    pageLength
+                );
+
+            pageLength =
+                AdjustJapanesePageBoundary(
+                    remainingText,
+                    pageLength
+                );
+
+            if (pageLength <= 0)
             {
-                if (
-                    currentLine.Length == 0 ||
-                    previousElementWasSpace
-                )
+                throw new InvalidOperationException(
+                    "TextMeshProによるページ分割位置を決定できませんでした。"
+                );
+            }
+
+            string pageText =
+                remainingText
+                    .Substring(0, pageLength)
+                    .TrimEnd(' ', '\t');
+
+            if (pageText.Length == 0)
+            {
+                int firstElementLength =
+                    GetFirstTextElementLength(
+                        remainingText
+                    );
+
+                if (firstElementLength <= 0)
                 {
-                    continue;
+                    throw new InvalidOperationException(
+                        "本文から表示可能な文字を取得できませんでした。"
+                    );
                 }
 
-                element = " ";
-                previousElementWasSpace = true;
-            }
-            else
-            {
-                previousElementWasSpace = false;
+                pageLength = firstElementLength;
+                pageText =
+                    remainingText.Substring(
+                        0,
+                        pageLength
+                    );
             }
 
-            currentLine.Append(element);
-            currentLineElementCount++;
+            pages.Add(pageText);
 
-            if (currentLineElementCount >= charactersPerLine)
+            sourceIndex += pageLength;
+            pageIndex++;
+            safetyCounter++;
+
+            if (
+                safetyCounter >
+                normalizedText.Length + 1
+            )
             {
-                CommitLine(
-                    currentLine,
-                    ref currentLineElementCount,
-                    pageLines,
-                    pages,
-                    linesPerPage,
-                    allowEmptyLine: false
+                throw new InvalidOperationException(
+                    "ページ分割処理が安全上限を超えました。"
                 );
-
-                previousElementWasSpace = false;
             }
         }
 
-        if (currentLine.Length > 0)
-        {
-            CommitLine(
-                currentLine,
-                ref currentLineElementCount,
-                pageLines,
-                pages,
-                linesPerPage,
-                allowEmptyLine: false
-            );
-        }
+        ClearMeasurementText(
+            leftPageTextComponent
+        );
 
-        CommitPage(pageLines, pages);
+        ClearMeasurementText(
+            rightPageTextComponent
+        );
 
         return pages;
     }
 
-    private static string NormalizeText(string text)
+    private static int MeasurePageLength(
+        string remainingText,
+        TMP_Text measurementComponent
+    )
+    {
+        measurementComponent.text =
+            remainingText;
+
+        measurementComponent.ForceMeshUpdate(
+            ignoreActiveState: true,
+            forceTextReparsing: true
+        );
+
+        bool isOverflowing =
+            measurementComponent.isTextOverflowing ||
+            measurementComponent.isTextTruncated;
+
+        int overflowIndex =
+            measurementComponent
+                .firstOverflowCharacterIndex;
+
+        if (
+            !isOverflowing ||
+            overflowIndex < 0
+        )
+        {
+            return remainingText.Length;
+        }
+
+        if (overflowIndex > 0)
+        {
+            return overflowIndex;
+        }
+
+        int firstElementLength =
+            GetFirstTextElementLength(
+                remainingText
+            );
+
+        if (firstElementLength <= 0)
+        {
+            throw new InvalidOperationException(
+                "TextMeshProの表示領域へ文字を配置できません。"
+            );
+        }
+
+        string firstElement =
+            remainingText.Substring(
+                0,
+                firstElementLength
+            );
+
+        measurementComponent.text =
+            firstElement;
+
+        measurementComponent.ForceMeshUpdate(
+            ignoreActiveState: true,
+            forceTextReparsing: true
+        );
+
+        if (
+            measurementComponent.isTextOverflowing ||
+            measurementComponent.isTextTruncated
+        )
+        {
+            throw new InvalidOperationException(
+                "TextMeshProの表示領域に1文字も収まりません。" +
+                "ページの幅・高さ、フォントサイズ、マージンを確認してください。"
+            );
+        }
+
+        return firstElementLength;
+    }
+
+    private static int AlignToTextElementBoundary(
+        string text,
+        int requestedIndex
+    )
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+
+        if (requestedIndex >= text.Length)
+        {
+            return text.Length;
+        }
+
+        if (requestedIndex <= 0)
+        {
+            return GetFirstTextElementLength(text);
+        }
+
+        int[] elementStarts =
+            StringInfo.ParseCombiningCharacters(text);
+
+        int alignedIndex = 0;
+
+        foreach (int elementStart in elementStarts)
+        {
+            if (elementStart > requestedIndex)
+            {
+                break;
+            }
+
+            alignedIndex = elementStart;
+        }
+
+        if (alignedIndex <= 0)
+        {
+            return GetFirstTextElementLength(text);
+        }
+
+        return alignedIndex;
+    }
+
+    private static int AdjustJapanesePageBoundary(
+        string text,
+        int splitIndex
+    )
+    {
+        if (
+            splitIndex <= 0 ||
+            splitIndex >= text.Length
+        )
+        {
+            return splitIndex;
+        }
+
+        int adjustedIndex = splitIndex;
+        int adjustmentCount = 0;
+        const int MaxAdjustments = 8;
+
+        while (
+            adjustedIndex > 0 &&
+            adjustedIndex < text.Length &&
+            adjustmentCount < MaxAdjustments
+        )
+        {
+            string nextElement =
+                StringInfo.GetNextTextElement(
+                    text,
+                    adjustedIndex
+                );
+
+            if (
+                !ProhibitedPageStartCharacters.Contains(
+                    nextElement
+                )
+            )
+            {
+                break;
+            }
+
+            int previousIndex =
+                GetPreviousTextElementStart(
+                    text,
+                    adjustedIndex
+                );
+
+            if (previousIndex <= 0)
+            {
+                break;
+            }
+
+            adjustedIndex = previousIndex;
+            adjustmentCount++;
+        }
+
+        while (
+            adjustedIndex > 0 &&
+            adjustmentCount < MaxAdjustments
+        )
+        {
+            int previousIndex =
+                GetPreviousTextElementStart(
+                    text,
+                    adjustedIndex
+                );
+
+            if (previousIndex < 0)
+            {
+                break;
+            }
+
+            string previousElement =
+                StringInfo.GetNextTextElement(
+                    text,
+                    previousIndex
+                );
+
+            if (
+                !ProhibitedPageEndCharacters.Contains(
+                    previousElement
+                )
+            )
+            {
+                break;
+            }
+
+            if (previousIndex <= 0)
+            {
+                break;
+            }
+
+            adjustedIndex = previousIndex;
+            adjustmentCount++;
+        }
+
+        return adjustedIndex;
+    }
+
+    private static int GetPreviousTextElementStart(
+        string text,
+        int currentIndex
+    )
+    {
+        if (
+            string.IsNullOrEmpty(text) ||
+            currentIndex <= 0
+        )
+        {
+            return -1;
+        }
+
+        int[] elementStarts =
+            StringInfo.ParseCombiningCharacters(text);
+
+        int previousIndex = -1;
+
+        foreach (int elementStart in elementStarts)
+        {
+            if (elementStart >= currentIndex)
+            {
+                break;
+            }
+
+            previousIndex = elementStart;
+        }
+
+        return previousIndex;
+    }
+
+    private static int GetFirstTextElementLength(
+        string text
+    )
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+
+        return StringInfo
+            .GetNextTextElement(text, 0)
+            .Length;
+    }
+
+    private static int SkipAsciiBoundaryWhitespace(
+        string text,
+        int startIndex
+    )
+    {
+        int index = startIndex;
+
+        while (index < text.Length)
+        {
+            char character = text[index];
+
+            if (
+                character != ' ' &&
+                character != '\t'
+            )
+            {
+                break;
+            }
+
+            index++;
+        }
+
+        return index;
+    }
+
+    private static void ValidateMeasurementComponent(
+        TMP_Text textComponent,
+        string pageName
+    )
+    {
+        Rect rect =
+            textComponent.rectTransform.rect;
+
+        if (
+            rect.width <= 0.01f ||
+            rect.height <= 0.01f
+        )
+        {
+            throw new InvalidOperationException(
+                pageName +
+                "のTextMeshPro表示領域の幅または高さが0です。"
+            );
+        }
+    }
+
+    private static void ClearMeasurementText(
+        TMP_Text textComponent
+    )
+    {
+        textComponent.text = string.Empty;
+
+        textComponent.ForceMeshUpdate(
+            ignoreActiveState: true,
+            forceTextReparsing: true
+        );
+    }
+
+    private static string NormalizeText(
+        string text
+    )
     {
         string normalized = text
             .Replace("\r\n", "\n")
@@ -133,74 +513,27 @@ public static class BookPaginator
             .Replace('\t', ' ')
             .Replace('\u00A0', ' ');
 
-        normalized = Regex.Replace(normalized, @"[ ]{2,}", " ");
-        normalized = Regex.Replace(normalized, @" *\n *", "\n");
-        normalized = Regex.Replace(normalized, @"\n{3,}", "\n\n");
+        normalized = Regex.Replace(
+            normalized,
+            @"[ ]{2,}",
+            " "
+        );
 
-        return normalized.Trim();
-    }
+        normalized = Regex.Replace(
+            normalized,
+            @" *\n *",
+            "\n"
+        );
 
-    private static void CommitLine(
-        StringBuilder currentLine,
-        ref int currentLineElementCount,
-        List<string> pageLines,
-        List<string> pages,
-        int linesPerPage,
-        bool allowEmptyLine
-    )
-    {
-        string line = currentLine.ToString().TrimEnd();
-        currentLine.Clear();
-        currentLineElementCount = 0;
+        normalized = Regex.Replace(
+            normalized,
+            @"\n{3,}",
+            "\n\n"
+        );
 
-        if (line.Length == 0)
-        {
-            if (!allowEmptyLine)
-            {
-                return;
-            }
-
-            if (
-                pageLines.Count == 0 ||
-                pageLines[pageLines.Count - 1].Length == 0
-            )
-            {
-                return;
-            }
-        }
-
-        pageLines.Add(line);
-
-        if (pageLines.Count >= linesPerPage)
-        {
-            CommitPage(pageLines, pages);
-        }
-    }
-
-    private static void CommitPage(
-        List<string> pageLines,
-        List<string> pages
-    )
-    {
-        if (pageLines.Count == 0)
-        {
-            return;
-        }
-
-        while (
-            pageLines.Count > 0 &&
-            pageLines[pageLines.Count - 1].Length == 0
-        )
-        {
-            pageLines.RemoveAt(pageLines.Count - 1);
-        }
-
-        if (pageLines.Count == 0)
-        {
-            return;
-        }
-
-        pages.Add(string.Join("\n", pageLines));
-        pageLines.Clear();
+        return normalized.Trim(
+            ' ',
+            '\n'
+        );
     }
 }
