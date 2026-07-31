@@ -1,453 +1,1062 @@
-using System.Collections;
 using System.Collections.Generic;
-using UnityEngine;
-using VersOne.Epub;
-using System.Text;
-using HtmlAgilityPack;
 using System.IO;
-using TMPro;
-using echo17.EndlessBook; // Include the EndlessBook namespace
+using System.Text;
 using System.Text.RegularExpressions;
+using echo17.EndlessBook;
+using HtmlAgilityPack;
+using UnityEngine;
 using UnityEngine.XR;
-using UnityEngine.Networking;
-
+using VersOne.Epub;
 
 public class BookController : MonoBehaviour
 {
-    public EndlessBook book;
-    public PageRenderer pageRenderer; // Reference to the PageRenderer component
-    private int charIndex = 0; // Character index to keep track of text position
-    private string fullBookContent; // Holds the entire text content of the book
-    private List<int> pageStartIndices = new List<int>(); // Stores the start index of each page
-    private int currentLeftPageIndex = 0; // Tracks the current page index
-                                          // Duration of the open/close animation
-    public float openCloseTime = 1.0f; // 1 second for the animation
+    private const int CharsPerLine = 38;
+    private const int MaxLinesPerPage = 16;
+    private const int CharsPerPage =
+        CharsPerLine * MaxLinesPerPage;
 
+    private const int ParagraphBreakFrequency = 6;
 
-    // References to audio clips
-    public AudioClip bookOpenClip;
-    public AudioClip bookCloseClip;
-    public AudioClip pageTurnClip;
+    [Header("EPUB")]
 
-    // AudioSource components that will play the audio clips
+    [Tooltip(
+        "Projectウィンドウに追加したEPUBファイルを指定します。"
+    )]
+    [SerializeField]
+    private EpubAsset epubFile;
+
+    [Header("Book References")]
+
+    [Tooltip("EndlessBookコンポーネントを指定します。")]
+    [SerializeField]
+    private EndlessBook book;
+
+    [Tooltip("PageRendererコンポーネントを指定します。")]
+    [SerializeField]
+    private PageRenderer pageRenderer;
+
+    [Header("Animation")]
+
+    [Tooltip("本を開閉するアニメーション時間です。")]
+    [SerializeField]
+    private float openCloseTime = 1.0f;
+
+    [Header("Input")]
+
+    [Tooltip("ページ操作を連続して受け付けない時間です。")]
+    [SerializeField]
+    private float inputDelay = 0.5f;
+
+    [Header("Audio")]
+
+    [SerializeField]
+    private AudioClip bookOpenClip;
+
+    [SerializeField]
+    private AudioClip bookCloseClip;
+
+    [SerializeField]
+    private AudioClip pageTurnClip;
+
+    // EPUB全体から抽出した本文
+    private string fullBookContent = string.Empty;
+
+    // 次にページへ追加する本文の文字位置
+    private int charIndex;
+
+    // 生成済みの各ページの開始文字位置
+    private readonly List<int> pageStartIndices =
+        new List<int>();
+
+    // 現在の左ページに対応するインデックス
+    private int currentLeftPageIndex;
+
+    // EPUBの読み込みが完了しているか
+    private bool isEpubLoaded;
+
+    // 最後にページ操作を受け付けた時刻
+    private float lastInputTime;
+
+    // VRコントローラー取得用リスト
+    private readonly List<InputDevice> inputDevices =
+        new List<InputDevice>();
+
+    // 音声再生用AudioSource
     private AudioSource bookOpenSound;
     private AudioSource bookCloseSound;
     private AudioSource pageTurnSound;
-    void Start()
+
+    private void Start()
     {
-        // Load audio clips
         LoadAudioClips();
 
-        // Start coroutine to load EPUB file
-        StartCoroutine(LoadEpubFromStreamingAssets());
-    }
-
-    void LoadAudioClips()
-    {
-        // Assuming the audio clips are located in a folder named "Sounds" within the Resources folder
-        bookOpenClip = Resources.Load<AudioClip>("Sounds/BookOpen");
-        bookCloseClip = Resources.Load<AudioClip>("Sounds/BookClose");
-        pageTurnClip = Resources.Load<AudioClip>("Sounds/PageTurn");
-
-
-        // Create and assign AudioSource components, set clip, and other properties
-        bookOpenSound = gameObject.AddComponent<AudioSource>();
-        bookOpenSound.clip = bookOpenClip;
-        bookOpenSound.playOnAwake = false; // So it doesn't play immediately
-
-        bookCloseSound = gameObject.AddComponent<AudioSource>();
-        bookCloseSound.clip = bookCloseClip;
-        bookCloseSound.playOnAwake = false; // So it doesn't play immediately
-
-        pageTurnSound = gameObject.AddComponent<AudioSource>();
-        pageTurnSound.clip = pageTurnClip;
-        pageTurnSound.playOnAwake = false; // So it doesn't play immediately
-
-
-    }
-
-    IEnumerator LoadEpubFromStreamingAssets()
-    {
-        string filePath = System.IO.Path.Combine(Application.streamingAssetsPath, "gon.epub");
-        UnityWebRequest request = UnityWebRequest.Get(filePath);
-        yield return request.SendWebRequest();
-
-        if (request.result == UnityWebRequest.Result.Success)
+        if (!ValidateReferences())
         {
-            // Use the downloaded data as a byte array or convert it to a string
-            byte[] epubBytes = request.downloadHandler.data;
-
-            Debug.Log("EPUB loaded successfully");
-
-            Debug.Log("EPUB size: " + epubBytes.Length);
-
-            // Assuming you have a method that handles the byte array for the EPUB
-            HandleEpubData(epubBytes);
+            enabled = false;
+            return;
         }
-        else
-        {
-            Debug.LogError("Error loading EPUB: " + request.error);
-        }
+
+        LoadAssignedEpub();
     }
 
-    void HandleEpubData(byte[] epubData)
+    private void Update()
     {
-        // Here you would convert the byte array to a stream and then to the EpubBook object
-        // This is pseudocode and will need to be replaced with the actual implementation
-        using (MemoryStream epubStream = new MemoryStream(epubData))
+        if (!isEpubLoaded)
         {
-            EpubBook epubBook = EpubReader.ReadBook(epubStream);
-            fullBookContent = ExtractContent(epubBook);
-
-            // Log the first 20 characters of the book content
-            Debug.Log("Book content: " + (fullBookContent.Length >= 20 ? fullBookContent.Substring(0, 20) : fullBookContent));
+            return;
         }
-    }
 
+        if (Time.time - lastInputTime <= inputDelay)
+        {
+            return;
+        }
 
-private float inputDelay = 0.5f; // Time in seconds to wait between inputs
-private float lastInputTime = 0f; // Time when the last input was registered
-
-void Update()
-{
-    // Ensure enough time has passed since the last input
-    if (Time.time - lastInputTime > inputDelay)
-    {
-        // Check for keyboard input
         if (Input.GetKeyDown(KeyCode.RightArrow))
         {
             HandleRightTurn();
-            lastInputTime = Time.time; // Update the last input time
+            lastInputTime = Time.time;
+            return;
         }
-        else if (Input.GetKeyDown(KeyCode.LeftArrow))
+
+        if (Input.GetKeyDown(KeyCode.LeftArrow))
         {
             HandleLeftTurn();
-            lastInputTime = Time.time; // Update the last input time
+            lastInputTime = Time.time;
+            return;
         }
 
-        // Check for VR controller input
-        var inputDevices = new List<InputDevice>();
-        InputDevices.GetDevicesWithCharacteristics(InputDeviceCharacteristics.Controller, inputDevices);
+        CheckVrControllerInput();
+    }
 
-        foreach (var device in inputDevices)
+    /// <summary>
+    /// Inspector上の必須参照が設定されているか確認します。
+    /// </summary>
+    private bool ValidateReferences()
+    {
+        bool isValid = true;
+
+        if (book == null)
         {
-            if (device.TryGetFeatureValue(CommonUsages.primaryButton, out bool xButtonPressed) && xButtonPressed)
+            Debug.LogError(
+                "BookControllerのBookが設定されていません。",
+                this
+            );
+
+            isValid = false;
+        }
+
+        if (pageRenderer == null)
+        {
+            Debug.LogError(
+                "BookControllerのPage Rendererが設定されていません。",
+                this
+            );
+
+            isValid = false;
+        }
+
+        return isValid;
+    }
+
+    /// <summary>
+    /// Inspectorで指定されたEPUBを読み込みます。
+    /// </summary>
+    private void LoadAssignedEpub()
+    {
+        ResetEpubState();
+
+        if (epubFile == null)
+        {
+            Debug.LogError(
+                "EPUB Fileが設定されていません。" +
+                "Projectウィンドウの.epubファイルを、" +
+                "BookControllerのEPUB File欄へドラッグしてください。",
+                this
+            );
+
+            return;
+        }
+
+        byte[] epubBytes = epubFile.Data;
+
+        if (epubBytes == null || epubBytes.Length == 0)
+        {
+            Debug.LogError(
+                "指定されたEPUBにデータがありません: " +
+                epubFile.OriginalFileName,
+                this
+            );
+
+            return;
+        }
+
+        try
+        {
+            Debug.Log(
+                "EPUBを読み込みます: " +
+                epubFile.OriginalFileName,
+                this
+            );
+
+            Debug.Log(
+                "EPUBサイズ: " +
+                epubBytes.Length +
+                " bytes",
+                this
+            );
+
+            HandleEpubData(epubBytes);
+
+            if (string.IsNullOrWhiteSpace(fullBookContent))
+            {
+                Debug.LogError(
+                    "EPUBから表示可能な本文を抽出できませんでした: " +
+                    epubFile.OriginalFileName,
+                    this
+                );
+
+                return;
+            }
+
+            isEpubLoaded = true;
+
+            Debug.Log(
+                "EPUBの読み込みに成功しました: " +
+                epubFile.OriginalFileName,
+                this
+            );
+
+            Debug.Log(
+                "抽出文字数: " +
+                fullBookContent.Length,
+                this
+            );
+        }
+        catch (System.Exception exception)
+        {
+            isEpubLoaded = false;
+            fullBookContent = string.Empty;
+
+            Debug.LogError(
+                "EPUBの読み込みまたは解析に失敗しました: " +
+                exception.GetType().Name +
+                ": " +
+                exception.Message,
+                this
+            );
+        }
+    }
+
+    /// <summary>
+    /// EPUB関連の状態を初期化します。
+    /// </summary>
+    private void ResetEpubState()
+    {
+        isEpubLoaded = false;
+        fullBookContent = string.Empty;
+
+        charIndex = 0;
+        currentLeftPageIndex = 0;
+
+        pageStartIndices.Clear();
+    }
+
+    /// <summary>
+    /// EPUBのバイト配列をVersOne.Epubで解析します。
+    /// </summary>
+    private void HandleEpubData(byte[] epubData)
+    {
+        using MemoryStream epubStream =
+            new MemoryStream(epubData);
+
+        EpubBook epubBook =
+            EpubReader.ReadBook(epubStream);
+
+        fullBookContent =
+            ExtractContent(epubBook).Trim();
+
+        string preview =
+            fullBookContent.Length > 20
+                ? fullBookContent.Substring(0, 20)
+                : fullBookContent;
+
+        Debug.Log(
+            "本文の先頭: " +
+            preview,
+            this
+        );
+    }
+
+    /// <summary>
+    /// Resourcesフォルダから効果音を読み込みます。
+    /// Inspectorですでに設定されている場合は、その設定を優先します。
+    /// </summary>
+    private void LoadAudioClips()
+    {
+        if (bookOpenClip == null)
+        {
+            bookOpenClip =
+                Resources.Load<AudioClip>(
+                    "Sounds/BookOpen"
+                );
+        }
+
+        if (bookCloseClip == null)
+        {
+            bookCloseClip =
+                Resources.Load<AudioClip>(
+                    "Sounds/BookClose"
+                );
+        }
+
+        if (pageTurnClip == null)
+        {
+            pageTurnClip =
+                Resources.Load<AudioClip>(
+                    "Sounds/PageTurn"
+                );
+        }
+
+        bookOpenSound =
+            CreateAudioSource(bookOpenClip);
+
+        bookCloseSound =
+            CreateAudioSource(bookCloseClip);
+
+        pageTurnSound =
+            CreateAudioSource(pageTurnClip);
+    }
+
+    /// <summary>
+    /// 効果音用AudioSourceを作成します。
+    /// </summary>
+    private AudioSource CreateAudioSource(
+        AudioClip clip
+    )
+    {
+        AudioSource audioSource =
+            gameObject.AddComponent<AudioSource>();
+
+        audioSource.clip = clip;
+        audioSource.playOnAwake = false;
+
+        return audioSource;
+    }
+
+    /// <summary>
+    /// AudioClipが設定されている場合だけ再生します。
+    /// </summary>
+    private static void PlaySound(
+        AudioSource audioSource
+    )
+    {
+        if (
+            audioSource != null &&
+            audioSource.clip != null
+        )
+        {
+            audioSource.Play();
+        }
+    }
+
+    /// <summary>
+    /// VRコントローラーのボタン入力を確認します。
+    /// </summary>
+    private void CheckVrControllerInput()
+    {
+        inputDevices.Clear();
+
+        InputDevices.GetDevicesWithCharacteristics(
+            InputDeviceCharacteristics.Controller,
+            inputDevices
+        );
+
+        foreach (InputDevice device in inputDevices)
+        {
+            bool primaryPressed;
+
+            if (
+                device.TryGetFeatureValue(
+                    CommonUsages.primaryButton,
+                    out primaryPressed
+                ) &&
+                primaryPressed
+            )
             {
                 HandleRightTurn();
-                lastInputTime = Time.time; // Update the last input time
+                lastInputTime = Time.time;
+                return;
             }
-            else if (device.TryGetFeatureValue(CommonUsages.secondaryButton, out bool aButtonPressed) && aButtonPressed)
+
+            bool secondaryPressed;
+
+            if (
+                device.TryGetFeatureValue(
+                    CommonUsages.secondaryButton,
+                    out secondaryPressed
+                ) &&
+                secondaryPressed
+            )
             {
                 HandleLeftTurn();
-                lastInputTime = Time.time; // Update the last input time
+                lastInputTime = Time.time;
+                return;
             }
         }
     }
-}
 
-
+    /// <summary>
+    /// 本を開く、または右方向へページを進めます。
+    /// </summary>
     private void HandleRightTurn()
     {
-        Debug.Log("Turn right");
-
-        // Check if the book is closed
-        if (book.CurrentState == EndlessBook.StateEnum.ClosedFront)
+        if (!CanOperateBook())
         {
-            // Open the book and add the first set of pages
+            return;
+        }
+
+        Debug.Log("Turn right", this);
+
+        if (
+            book.CurrentState ==
+            EndlessBook.StateEnum.ClosedFront
+        )
+        {
             OpenBookAndAddFirstPages();
         }
         else
         {
-            // Otherwise, turn the page right
             TurnPageRight();
         }
     }
+
+    /// <summary>
+    /// 左方向へページを戻します。
+    /// </summary>
     private void HandleLeftTurn()
     {
-        Debug.Log("Turn left");
+        if (!CanOperateBook())
+        {
+            return;
+        }
+
+        Debug.Log("Turn left", this);
+
         TurnPageLeft();
     }
 
+    /// <summary>
+    /// ページ操作が可能か確認します。
+    /// </summary>
+    private bool CanOperateBook()
+    {
+        if (!isEpubLoaded)
+        {
+            Debug.LogWarning(
+                "EPUBの読み込みが完了していないため、" +
+                "ページを操作できません。",
+                this
+            );
+
+            return false;
+        }
+
+        if (string.IsNullOrEmpty(fullBookContent))
+        {
+            Debug.LogWarning(
+                "本文が空のため、ページを操作できません。",
+                this
+            );
+
+            return false;
+        }
+
+        if (book == null || pageRenderer == null)
+        {
+            Debug.LogError(
+                "BookまたはPage Rendererが設定されていません。",
+                this
+            );
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// 本を開き、最初の左右ページを生成します。
+    /// </summary>
     private void OpenBookAndAddFirstPages()
     {
-        // Open the book
-        book.SetState(EndlessBook.StateEnum.OpenMiddle, openCloseTime, OnBookStateChanged);
-        pageTurnSound.Play();
+        book.SetState(
+            EndlessBook.StateEnum.OpenMiddle,
+            openCloseTime,
+            OnBookStateChanged
+        );
 
-        // currentLeftPageIndex += 2;
+        PlaySound(bookOpenSound);
 
         if (pageStartIndices.Count == 0)
         {
-
-            // Add the first set of pages
-            // AddNewPage();
+            AddNewPage();
         }
         else
         {
-            string leftPageText = RenderPageBasedOnIndex(currentLeftPageIndex);
-            string rightPageText = RenderPageBasedOnIndex(currentLeftPageIndex + 1);
+            string leftPageText =
+                RenderPageBasedOnIndex(
+                    currentLeftPageIndex
+                );
 
-            // Render the text onto materials using the PageRenderer
-            Material leftPageMaterial = pageRenderer.RenderLeftPageToMaterial(leftPageText);
-            Material rightPageMaterial = pageRenderer.RenderRightPageToMaterial(rightPageText);
+            string rightPageText =
+                RenderPageBasedOnIndex(
+                    currentLeftPageIndex + 1
+                );
 
-            // Update the materials for the current pages in the book
-            // Assuming UpdatePageDataMaterial updates the material for a specific page in the EndlessBook
-            book.UpdatePageDataMaterial(book.CurrentLeftPageNumber, leftPageMaterial);
-            book.UpdatePageDataMaterial(book.CurrentRightPageNumber, rightPageMaterial);
+            Material leftPageMaterial =
+                pageRenderer.RenderLeftPageToMaterial(
+                    leftPageText
+                );
+
+            Material rightPageMaterial =
+                pageRenderer.RenderRightPageToMaterial(
+                    rightPageText
+                );
+
+            book.UpdatePageDataMaterial(
+                book.CurrentLeftPageNumber,
+                leftPageMaterial
+            );
+
+            book.UpdatePageDataMaterial(
+                book.CurrentRightPageNumber,
+                rightPageMaterial
+            );
+
             currentLeftPageIndex += 2;
-
         }
-
-
     }
 
-    // Add the first set of pages
-    // Get the text for the current left and right pages
-
+    /// <summary>
+    /// 右方向へページを進めます。
+    /// </summary>
     private void TurnPageRight()
     {
-        if (currentLeftPageIndex < pageStartIndices.Count - 1)
+        if (
+            currentLeftPageIndex <
+            pageStartIndices.Count - 1
+        )
         {
             currentLeftPageIndex += 2;
-            Debug.Log("After page turn " + currentLeftPageIndex);
+
+            Debug.Log(
+                "After page turn: " +
+                currentLeftPageIndex,
+                this
+            );
 
             UpdatePageMaterials();
-            pageTurnSound.Play();
 
-            book.TurnToPage(book.CurrentLeftPageNumber + 2, EndlessBook.PageTurnTimeTypeEnum.TimePerPage, 0.5f);
+            PlaySound(pageTurnSound);
+
+            book.TurnToPage(
+                book.CurrentLeftPageNumber + 2,
+                EndlessBook.PageTurnTimeTypeEnum.TimePerPage,
+                0.5f
+            );
+
+            return;
         }
-        else if (IsAtLastPage())
+
+        if (IsAtLastPage())
         {
-
-            const int charsPerLine = 38; // Set the fixed number of characters per line
-            const int maxLinesPerPage = 16; // Set the maximum number of lines per page
-            const int charsPerPage = charsPerLine * maxLinesPerPage; // Calculate total characters per page
-
-            if (charIndex >= fullBookContent.Length || charIndex + charsPerPage >= fullBookContent.Length)
+            if (charIndex >= fullBookContent.Length)
             {
-                Debug.Log("Last page and end of content, close book");
-                // Close the book because we reached the end of the content
-                bookCloseSound.Play();
-                book.SetState(EndlessBook.StateEnum.ClosedFront, openCloseTime, (fromState, toState, pageNumber) => OnBookStateChanged(fromState, toState, pageNumber));
-                currentLeftPageIndex = 0;
-                book.SetPageNumber(1);
+                Debug.Log(
+                    "本文の最後に到達したため、本を閉じます。",
+                    this
+                );
+
+                CloseAndResetBook();
+                return;
             }
-            else
-            {
-                Debug.Log("Last page but not end of content, add new page");
 
-                currentLeftPageIndex += 2;
-                Debug.Log("After page turn " + currentLeftPageIndex);
+            Debug.Log(
+                "新しいページを追加します。",
+                this
+            );
 
-                AddNewPage();
-                pageTurnSound.Play();
-                book.TurnToPage(book.CurrentLeftPageNumber + 2, EndlessBook.PageTurnTimeTypeEnum.TimePerPage, 0.5f);
-            }
+            currentLeftPageIndex += 2;
+
+            AddNewPage();
+
+            PlaySound(pageTurnSound);
+
+            book.TurnToPage(
+                book.CurrentLeftPageNumber + 2,
+                EndlessBook.PageTurnTimeTypeEnum.TimePerPage,
+                0.5f
+            );
+
+            return;
         }
-        else
-        {
-            Debug.Log("Closing book");
 
-            bookCloseSound.Play();
-            book.SetState(EndlessBook.StateEnum.ClosedFront, openCloseTime, (fromState, toState, pageNumber) => OnBookStateChanged(fromState, toState, pageNumber));
-            currentLeftPageIndex = 0;
-            book.SetPageNumber(1);
-        }
+        Debug.Log(
+            "本を閉じます。",
+            this
+        );
+
+        CloseAndResetBook();
     }
 
-
-
-    // Method to handle book state changes
-    private void OnBookStateChanged(EndlessBook.StateEnum fromState, EndlessBook.StateEnum toState, int pageNumber)
-    {
-        // Here you can handle what happens when the book state changes
-        // For example, play a sound or update the UI
-        Debug.Log("Book state changed from " + fromState + " to " + toState);
-    }
-
+    /// <summary>
+    /// 左方向へページを戻します。
+    /// </summary>
     private void TurnPageLeft()
     {
-        if (currentLeftPageIndex > 0)
+        if (currentLeftPageIndex > 2)
         {
             currentLeftPageIndex -= 2;
+
             UpdatePageMaterials();
-            Debug.Log("After page turn " + currentLeftPageIndex);
-            book.TurnToPage(book.CurrentLeftPageNumber - 2, EndlessBook.PageTurnTimeTypeEnum.TimePerPage, 0.3f);
-            pageTurnSound.Play();
+
+            Debug.Log(
+                "After page turn: " +
+                currentLeftPageIndex,
+                this
+            );
+
+            book.TurnToPage(
+                book.CurrentLeftPageNumber - 2,
+                EndlessBook.PageTurnTimeTypeEnum.TimePerPage,
+                0.3f
+            );
+
+            PlaySound(pageTurnSound);
         }
         else
         {
-            // If we're at the first page, close the book
-            if (book.CurrentState != EndlessBook.StateEnum.ClosedFront)
+            if (
+                book.CurrentState !=
+                EndlessBook.StateEnum.ClosedFront
+            )
             {
-                book.SetState(EndlessBook.StateEnum.ClosedFront, openCloseTime, OnBookStateChanged);
-                bookCloseSound.Play();
+                CloseBookWithoutResettingContent();
             }
         }
     }
 
+    /// <summary>
+    /// 本を閉じ、表示位置を先頭へ戻します。
+    /// EPUB本文自体は再読み込みしません。
+    /// </summary>
+    private void CloseAndResetBook()
+    {
+        PlaySound(bookCloseSound);
 
+        book.SetState(
+            EndlessBook.StateEnum.ClosedFront,
+            openCloseTime,
+            OnBookStateChanged
+        );
 
+        currentLeftPageIndex = 0;
+
+        book.SetPageNumber(1);
+    }
+
+    /// <summary>
+    /// 本文の生成状態を維持したまま本を閉じます。
+    /// </summary>
+    private void CloseBookWithoutResettingContent()
+    {
+        PlaySound(bookCloseSound);
+
+        book.SetState(
+            EndlessBook.StateEnum.ClosedFront,
+            openCloseTime,
+            OnBookStateChanged
+        );
+
+        currentLeftPageIndex = 0;
+
+        book.SetPageNumber(1);
+    }
+
+    /// <summary>
+    /// 新しい左右ページを生成してEndlessBookへ追加します。
+    /// </summary>
     private void AddNewPage()
     {
+        string leftPageText =
+            GetNextPageText();
 
-        // Get text for the next left and right pages
-        string leftPageText = GetNextPageText();
-        string rightPageText = GetNextPageText();
+        string rightPageText =
+            GetNextPageText();
 
-        // Check if there is text for the new pages
-        if (!string.IsNullOrEmpty(leftPageText) || !string.IsNullOrEmpty(rightPageText))
+        if (
+            string.IsNullOrEmpty(leftPageText) &&
+            string.IsNullOrEmpty(rightPageText)
+        )
         {
-            // Render the text onto materials for left and right pages
-            Material leftPageMaterial = pageRenderer.RenderLeftPageToMaterial(leftPageText);
-            Material rightPageMaterial = pageRenderer.RenderRightPageToMaterial(rightPageText);
+            Debug.Log(
+                "追加できる本文がありません。",
+                this
+            );
 
-            // Add the rendered page materials to the book
-            book.AddPageData(leftPageMaterial);
-            book.AddPageData(rightPageMaterial);
-
+            return;
         }
+
+        Material leftPageMaterial =
+            pageRenderer.RenderLeftPageToMaterial(
+                leftPageText ?? string.Empty
+            );
+
+        Material rightPageMaterial =
+            pageRenderer.RenderRightPageToMaterial(
+                rightPageText ?? string.Empty
+            );
+
+        book.AddPageData(leftPageMaterial);
+        book.AddPageData(rightPageMaterial);
     }
 
+    /// <summary>
+    /// 現在位置に対応する左右ページのマテリアルを更新します。
+    /// </summary>
     private void UpdatePageMaterials()
     {
-        // Get the text for the current left and right pages
-        string leftPageText = RenderPageBasedOnIndex(currentLeftPageIndex - 2);
-        string rightPageText = RenderPageBasedOnIndex(currentLeftPageIndex - 1);
+        int leftPageIndex =
+            currentLeftPageIndex - 2;
 
-        // Render the text onto materials using the PageRenderer
-        Material leftPageMaterial = pageRenderer.RenderLeftPageToMaterial(leftPageText);
-        Material rightPageMaterial = pageRenderer.RenderRightPageToMaterial(rightPageText);
+        int rightPageIndex =
+            currentLeftPageIndex - 1;
 
-        // Update the materials for the current pages in the book
-        // Assuming UpdatePageDataMaterial updates the material for a specific page in the EndlessBook
-        book.UpdatePageDataMaterial(book.CurrentLeftPageNumber, leftPageMaterial);
-        book.UpdatePageDataMaterial(book.CurrentRightPageNumber, rightPageMaterial);
+        string leftPageText =
+            RenderPageBasedOnIndex(leftPageIndex);
+
+        string rightPageText =
+            RenderPageBasedOnIndex(rightPageIndex);
+
+        Material leftPageMaterial =
+            pageRenderer.RenderLeftPageToMaterial(
+                leftPageText
+            );
+
+        Material rightPageMaterial =
+            pageRenderer.RenderRightPageToMaterial(
+                rightPageText
+            );
+
+        book.UpdatePageDataMaterial(
+            book.CurrentLeftPageNumber,
+            leftPageMaterial
+        );
+
+        book.UpdatePageDataMaterial(
+            book.CurrentRightPageNumber,
+            rightPageMaterial
+        );
     }
 
+    /// <summary>
+    /// 現在、EndlessBook上の最後のページにいるか確認します。
+    /// </summary>
     private bool IsAtLastPage()
     {
-
-        // Check if the current page is the last in the book
-        return book.CurrentRightPageNumber >= book.LastPageNumber;
+        return
+            book.CurrentRightPageNumber >=
+            book.LastPageNumber;
     }
 
-    // Other methods (GetNextPageText, GetPrevPageText, RenderPageBasedOnIndex, ExtractContent, etc.) remain the same
-
-
-    private string RenderPageBasedOnIndex(int pageIndex)
+    /// <summary>
+    /// 指定ページインデックスの本文を生成します。
+    /// </summary>
+    private string RenderPageBasedOnIndex(
+        int pageIndex
+    )
     {
-        // Constants for text formatting
-        const int charsPerLine = 38; // Fixed number of characters per line
-        const int paragraphBreakFrequency = 6; // Lines after which to insert a paragraph break
-
-        // Check if the page index is valid
-        if (pageIndex < 0 || pageIndex >= pageStartIndices.Count)
+        if (
+            pageIndex < 0 ||
+            pageIndex >= pageStartIndices.Count
+        )
         {
-            book.SetState(EndlessBook.StateEnum.ClosedFront, openCloseTime, OnBookStateChanged);
-            return "";
+            return string.Empty;
         }
 
-        int startIndex = pageStartIndices[pageIndex];
-        int endIndex = (pageIndex < pageStartIndices.Count - 1) ? pageStartIndices[pageIndex + 1] : fullBookContent.Length;
+        int startIndex =
+            pageStartIndices[pageIndex];
 
-        // Extract the text for the current page
-        string pageText = fullBookContent.Substring(startIndex, endIndex - startIndex);
+        int endIndex =
+            pageIndex <
+            pageStartIndices.Count - 1
+                ? pageStartIndices[pageIndex + 1]
+                : fullBookContent.Length;
 
-        StringBuilder pageBuilder = new StringBuilder();
-        int lineCounter = 0;
-
-        // Loop through pageText in chunks of charsPerLine
-        for (int i = 0; i < pageText.Length; i += charsPerLine)
+        if (
+            startIndex < 0 ||
+            startIndex >= fullBookContent.Length ||
+            endIndex < startIndex
+        )
         {
-            int length = (i + charsPerLine > pageText.Length) ? pageText.Length - i : charsPerLine;
-            pageBuilder.AppendLine(pageText.Substring(i, length));
-            lineCounter++;
-
-            // Add paragraph breaks based on the frequency
-            if (lineCounter >= paragraphBreakFrequency && Random.Range(0, 2) > 0)
-            {
-                pageBuilder.AppendLine("\n");
-                lineCounter = 0;
-            }
+            return string.Empty;
         }
 
-        return pageBuilder.ToString().TrimEnd(new char[] { ' ', '\n' }); // Trim trailing whitespace or newlines
+        endIndex =
+            Mathf.Min(
+                endIndex,
+                fullBookContent.Length
+            );
+
+        string pageText =
+            fullBookContent.Substring(
+                startIndex,
+                endIndex - startIndex
+            );
+
+        return FormatPageText(pageText);
     }
 
-
-
+    /// <summary>
+    /// 次の1ページ分の本文を取得します。
+    /// 最終ページが608文字未満でも取得します。
+    /// </summary>
     private string GetNextPageText()
     {
-        const int charsPerLine = 38; // Set the fixed number of characters per line
-        const int maxLinesPerPage = 16; // Set the maximum number of lines per page
-        const int charsPerPage = charsPerLine * maxLinesPerPage; // Calculate total characters per page
-        const int paragraphBreakFrequency = 6; // Approximate number of lines after which to insert a paragraph break
+        if (
+            string.IsNullOrEmpty(fullBookContent) ||
+            charIndex >= fullBookContent.Length
+        )
+        {
+            return null;
+        }
 
-        if (charIndex + charsPerPage > fullBookContent.Length)
-            return null; // No more text to add
-
-        // Store the start index of the current page
         pageStartIndices.Add(charIndex);
 
-        string pageText = fullBookContent.Substring(charIndex, Mathf.Min(charsPerPage, fullBookContent.Length - charIndex));
-        StringBuilder pageBuilder = new StringBuilder();
+        int remainingCharacters =
+            fullBookContent.Length - charIndex;
+
+        int pageLength =
+            Mathf.Min(
+                CharsPerPage,
+                remainingCharacters
+            );
+
+        string pageText =
+            fullBookContent.Substring(
+                charIndex,
+                pageLength
+            );
+
+        charIndex += pageLength;
+
+        return FormatPageText(pageText);
+    }
+
+    /// <summary>
+    /// 1ページ分の文字列へ改行を追加します。
+    /// </summary>
+    private string FormatPageText(
+        string pageText
+    )
+    {
+        if (string.IsNullOrEmpty(pageText))
+        {
+            return string.Empty;
+        }
+
+        StringBuilder pageBuilder =
+            new StringBuilder();
+
         int lineCounter = 0;
 
-        // Loop through pageText in chunks of charsPerLine
-        for (int i = 0; i < pageText.Length; i += charsPerLine)
+        for (
+            int index = 0;
+            index < pageText.Length;
+            index += CharsPerLine
+        )
         {
-            int length = charsPerLine;
-            if (i + length > pageText.Length) length = pageText.Length - i;
+            int length =
+                Mathf.Min(
+                    CharsPerLine,
+                    pageText.Length - index
+                );
 
-            pageBuilder.AppendLine(pageText.Substring(i, length));
+            pageBuilder.AppendLine(
+                pageText.Substring(
+                    index,
+                    length
+                )
+            );
+
             lineCounter++;
 
-            if (lineCounter >= paragraphBreakFrequency && Random.Range(0, 2) > 0)
+            if (
+                lineCounter >=
+                ParagraphBreakFrequency &&
+                Random.Range(0, 2) > 0
+            )
             {
-                pageBuilder.AppendLine("\n");
+                pageBuilder.AppendLine();
                 lineCounter = 0;
             }
         }
 
-        // Update charIndex to the next set of characters
-        charIndex += pageText.Length;
-
-        return pageBuilder.ToString().TrimEnd(new char[] { ' ', '\n' }); // Trim any trailing whitespace or newlines
+        return pageBuilder
+            .ToString()
+            .TrimEnd(' ', '\r', '\n');
     }
 
-
-
-    private string ExtractContent(EpubBook epubBook)
+    /// <summary>
+    /// EPUBのReadingOrderから本文を抽出します。
+    /// </summary>
+    private string ExtractContent(
+        EpubBook epubBook
+    )
     {
-        // Extract text from all reading order items and concatenate
-        StringBuilder fullContent = new StringBuilder();
-        foreach (EpubLocalTextContentFile textContentFile in epubBook.ReadingOrder)
+        if (epubBook == null)
         {
-            string content = ExtractPlainText(textContentFile);
-            // Remove all newlines and extra spaces
-            string normalizedContent = Regex.Replace(content, @"\s+", " ");
-            fullContent.Append(normalizedContent);
+            return string.Empty;
         }
+
+        StringBuilder fullContent =
+            new StringBuilder();
+
+        foreach (
+            EpubLocalTextContentFile textContentFile
+            in epubBook.ReadingOrder
+        )
+        {
+            string content =
+                ExtractPlainText(textContentFile);
+
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                continue;
+            }
+
+            string normalizedContent =
+                Regex.Replace(
+                    content,
+                    @"\s+",
+                    " "
+                );
+
+            if (
+                fullContent.Length > 0 &&
+                !char.IsWhiteSpace(
+                    fullContent[
+                        fullContent.Length - 1
+                    ]
+                )
+            )
+            {
+                fullContent.Append(' ');
+            }
+
+            fullContent.Append(
+                normalizedContent.Trim()
+            );
+        }
+
         return fullContent.ToString();
     }
 
-    private string ExtractPlainText(EpubLocalTextContentFile textContentFile)
+    /// <summary>
+    /// XHTMLまたはHTMLから表示用のプレーンテキストを抽出します。
+    /// </summary>
+    private string ExtractPlainText(
+        EpubLocalTextContentFile textContentFile
+    )
     {
-        HtmlDocument htmlDocument = new HtmlDocument();
-        htmlDocument.LoadHtml(textContentFile.Content);
-        StringBuilder sb = new StringBuilder();
-        foreach (HtmlNode node in htmlDocument.DocumentNode.SelectNodes("//text()"))
+        if (
+            textContentFile == null ||
+            string.IsNullOrWhiteSpace(
+                textContentFile.Content
+            )
+        )
         {
-            // Remove all newlines and carriage returns from the text node
-            string text = node.InnerText.Trim();
-            text = Regex.Replace(text, @"\r\n?|\n", " "); // Replace all types of newlines with a space
-            sb.Append(text + " "); // Append text with a trailing space to separate paragraphs
+            return string.Empty;
         }
-        // Replace occurrences of multiple spaces with two newlines to denote new paragraphs
-        string content = Regex.Replace(sb.ToString(), @"[ ]{2,}", "\n\n");
-        return content;
+
+        HtmlDocument htmlDocument =
+            new HtmlDocument();
+
+        htmlDocument.LoadHtml(
+            textContentFile.Content
+        );
+
+        HtmlNodeCollection textNodes =
+            htmlDocument.DocumentNode.SelectNodes(
+                "//text()[not(ancestor::script)" +
+                " and not(ancestor::style)]"
+            );
+
+        if (textNodes == null)
+        {
+            return string.Empty;
+        }
+
+        StringBuilder textBuilder =
+            new StringBuilder();
+
+        foreach (HtmlNode node in textNodes)
+        {
+            if (node == null)
+            {
+                continue;
+            }
+
+            string text =
+                HtmlEntity.DeEntitize(
+                    node.InnerText
+                );
+
+            text = Regex.Replace(
+                text,
+                @"\r\n?|\n",
+                " "
+            );
+
+            text = text.Trim();
+
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                continue;
+            }
+
+            if (textBuilder.Length > 0)
+            {
+                textBuilder.Append(' ');
+            }
+
+            textBuilder.Append(text);
+        }
+
+        return Regex.Replace(
+            textBuilder.ToString(),
+            @"[ ]{2,}",
+            " "
+        );
     }
 
+    /// <summary>
+    /// EndlessBookの状態変化時に呼ばれます。
+    /// </summary>
+    private void OnBookStateChanged(
+        EndlessBook.StateEnum fromState,
+        EndlessBook.StateEnum toState,
+        int pageNumber
+    )
+    {
+        Debug.Log(
+            "Book state changed from " +
+            fromState +
+            " to " +
+            toState +
+            ", page: " +
+            pageNumber,
+            this
+        );
+    }
 }
