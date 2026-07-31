@@ -1,150 +1,77 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Text;
 using System.Text.RegularExpressions;
+using TMPro;
+using UnityEngine;
 
 /// <summary>
-/// EPUBから抽出した本文をページ単位へ分割します。
-///
-/// 主な処理:
-/// ・Unicodeの書記素単位で文字を扱う
-/// ・EPUBから抽出した改行を維持する
-/// ・日本語の行頭禁則と行末禁則を適用する
-/// ・同じ本文から常に同じページを生成する
+/// TextMeshProの実際の表示領域を使って本文をページへ分割します。
+/// 固定文字数・固定行数では分割しません。
 /// </summary>
 public static class BookPaginator
 {
+    private const float BoundsTolerance = 0.5f;
+
     /// <summary>
-    /// 行頭に配置しない文字です。
-    ///
-    /// 句読点、閉じ括弧、小書き文字、長音記号などを含みます。
+    /// ページ先頭に置かない文字です。
+    /// TextMeshPro内部の禁則処理に加え、ページ境界でも使用します。
     /// </summary>
     private static readonly HashSet<string>
-        ProhibitedLineStartCharacters =
+        ProhibitedPageStartCharacters =
             new HashSet<string>(StringComparer.Ordinal)
             {
-                "、",
-                "。",
-                "，",
-                "．",
-                "・",
-                "：",
-                "；",
-                "！",
-                "？",
-                "‼",
-                "⁇",
-                "⁈",
-                "⁉",
-
-                "）",
-                "〕",
-                "］",
-                "｝",
-                "〉",
-                "》",
-                "」",
-                "』",
-                "】",
-                "〙",
-                "〗",
-                "〟",
-                "’",
-                "”",
-                "｠",
-                "»",
-
-                "ぁ",
-                "ぃ",
-                "ぅ",
-                "ぇ",
-                "ぉ",
-                "っ",
-                "ゃ",
-                "ゅ",
-                "ょ",
-                "ゎ",
-
-                "ァ",
-                "ィ",
-                "ゥ",
-                "ェ",
-                "ォ",
-                "ッ",
-                "ャ",
-                "ュ",
-                "ョ",
-                "ヮ",
-                "ヵ",
-                "ヶ",
-
-                "ー",
-                "〜",
-                "～",
-                "…",
-                "‥",
-                "ヽ",
-                "ヾ",
-                "ゝ",
-                "ゞ",
-                "々",
-
-                "％",
-                "%",
-                "℃",
-                "°"
+                "、", "。", "，", "．", "・",
+                "：", "；", "！", "？",
+                "‼", "⁇", "⁈", "⁉",
+                "）", "〕", "］", "｝",
+                "〉", "》", "」", "』", "】",
+                "〙", "〗", "〟", "’", "”",
+                "｠", "»",
+                "ぁ", "ぃ", "ぅ", "ぇ", "ぉ",
+                "っ", "ゃ", "ゅ", "ょ", "ゎ",
+                "ァ", "ィ", "ゥ", "ェ", "ォ",
+                "ッ", "ャ", "ュ", "ョ", "ヮ",
+                "ヵ", "ヶ",
+                "ー", "〜", "～", "…", "‥",
+                "ヽ", "ヾ", "ゝ", "ゞ", "々",
+                "％", "%", "℃", "°"
             };
 
     /// <summary>
-    /// 行末に配置しない文字です。
-    ///
-    /// 開き括弧や開き引用符などを含みます。
+    /// ページ末尾に置かない文字です。
     /// </summary>
     private static readonly HashSet<string>
-        ProhibitedLineEndCharacters =
+        ProhibitedPageEndCharacters =
             new HashSet<string>(StringComparer.Ordinal)
             {
-                "（",
-                "〔",
-                "［",
-                "｛",
-                "〈",
-                "《",
-                "「",
-                "『",
-                "【",
-                "〘",
-                "〖",
-                "〝",
-                "‘",
-                "“",
-                "｟",
-                "«"
+                "（", "〔", "［", "｛",
+                "〈", "《", "「", "『", "【",
+                "〘", "〖", "〝", "‘", "“",
+                "｟", "«"
             };
 
     /// <summary>
-    /// 本文をページへ分割します。
+    /// 左右ページのTextMeshProを交互に使い、
+    /// 実際に収まる最大範囲で本文を分割します。
     /// </summary>
     public static List<string> Paginate(
         string sourceText,
-        int charactersPerLine,
-        int linesPerPage
+        TMP_Text leftPageText,
+        TMP_Text rightPageText
     )
     {
-        if (charactersPerLine <= 0)
+        if (leftPageText == null)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(charactersPerLine),
-                "1行の文字数は1以上である必要があります。"
+            throw new ArgumentNullException(
+                nameof(leftPageText)
             );
         }
 
-        if (linesPerPage <= 0)
+        if (rightPageText == null)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(linesPerPage),
-                "1ページの行数は1以上である必要があります。"
+            throw new ArgumentNullException(
+                nameof(rightPageText)
             );
         }
 
@@ -156,215 +83,277 @@ public static class BookPaginator
             return pages;
         }
 
+        ValidateTextContainer(
+            leftPageText,
+            "左ページ"
+        );
+
+        ValidateTextContainer(
+            rightPageText,
+            "右ページ"
+        );
+
         string normalizedText =
             NormalizeText(sourceText);
 
-        List<string> textElements =
-            GetTextElements(normalizedText);
+        int[] elementBoundaries =
+            BuildTextElementBoundaries(
+                normalizedText
+            );
 
-        List<string> pageLines =
-            new List<string>(linesPerPage);
+        int elementCount =
+            elementBoundaries.Length - 1;
 
-        List<string> currentLine =
-            new List<string>(charactersPerLine + 4);
+        int currentElementIndex =
+            SkipPageLeadingWhitespace(
+                normalizedText,
+                elementBoundaries,
+                0,
+                elementCount
+            );
 
-        bool previousElementWasSpace = false;
-        int index = 0;
+        string originalLeftText =
+            leftPageText.text;
 
-        while (index < textElements.Count)
+        string originalRightText =
+            rightPageText.text;
+
+        try
         {
-            string element = textElements[index];
-
-            if (element == "\r")
+            while (
+                currentElementIndex <
+                elementCount
+            )
             {
-                index++;
-                continue;
-            }
+                TMP_Text measurementText =
+                    pages.Count % 2 == 0
+                        ? leftPageText
+                        : rightPageText;
 
-            // EPUBに記録された明示的な改行です。
-            if (element == "\n")
-            {
-                CommitLine(
-                    currentLine,
-                    pageLines,
-                    pages,
-                    linesPerPage,
-                    allowEmptyLine: true
-                );
+                int endElementIndex =
+                    FindLargestFittingEnd(
+                        normalizedText,
+                        elementBoundaries,
+                        currentElementIndex,
+                        elementCount,
+                        measurementText
+                    );
 
-                previousElementWasSpace = false;
-                index++;
-                continue;
-            }
-
-            // 半角空白などは連続させません。
-            // 全角スペースは字下げとして残します。
-            if (IsCollapsibleWhitespace(element))
-            {
                 if (
-                    currentLine.Count == 0 ||
-                    previousElementWasSpace
+                    endElementIndex <=
+                    currentElementIndex
                 )
                 {
-                    index++;
-                    continue;
+                    throw new InvalidOperationException(
+                        "TextMeshProの表示領域に1文字も収まりません。" +
+                        "フォントサイズ、マージン、またはTextMeshProの" +
+                        "RectTransformサイズを確認してください。"
+                    );
                 }
 
-                element = " ";
-                previousElementWasSpace = true;
+                endElementIndex =
+                    AdjustPageBoundaryForJapaneseText(
+                        normalizedText,
+                        elementBoundaries,
+                        currentElementIndex,
+                        endElementIndex,
+                        elementCount
+                    );
+
+                int startCharacterIndex =
+                    elementBoundaries[
+                        currentElementIndex
+                    ];
+
+                int endCharacterIndex =
+                    elementBoundaries[
+                        endElementIndex
+                    ];
+
+                string pageText =
+                    normalizedText.Substring(
+                        startCharacterIndex,
+                        endCharacterIndex -
+                        startCharacterIndex
+                    );
+
+                pageText =
+                    TrimPageEnd(pageText);
+
+                if (pageText.Length > 0)
+                {
+                    pages.Add(pageText);
+                }
+
+                currentElementIndex =
+                    SkipPageLeadingWhitespace(
+                        normalizedText,
+                        elementBoundaries,
+                        endElementIndex,
+                        elementCount
+                    );
             }
-            else
-            {
-                previousElementWasSpace = false;
-            }
-
-            currentLine.Add(element);
-            index++;
-
-            if (currentLine.Count < charactersPerLine)
-            {
-                continue;
-            }
-
-            /*
-             * 次の文字が「、」「。」などの場合は、
-             * 次行の先頭へ送らず現在行へ追加します。
-             *
-             * その結果、指定文字数を1～数文字だけ超えることがあります。
-             * これは句読点が行頭へ来るより自然な表示を優先するためです。
-             */
-            AbsorbProhibitedLineStartCharacters(
-                textElements,
-                ref index,
-                currentLine
-            );
-
-            /*
-             * 現在行の末尾が「「」や「（」の場合は、
-             * その開き括弧を次行へ移動します。
-             */
-            List<string> carryOver =
-                DetachProhibitedLineEndCharacters(
-                    currentLine
-                );
-
-            CommitLine(
-                currentLine,
-                pageLines,
-                pages,
-                linesPerPage,
-                allowEmptyLine: false
-            );
-
-            currentLine.AddRange(carryOver);
-
-            previousElementWasSpace =
-                currentLine.Count > 0 &&
-                currentLine[currentLine.Count - 1] == " ";
         }
-
-        if (currentLine.Count > 0)
+        finally
         {
-            CommitLine(
-                currentLine,
-                pageLines,
-                pages,
-                linesPerPage,
-                allowEmptyLine: false
+            RestoreTextComponent(
+                leftPageText,
+                originalLeftText
+            );
+
+            RestoreTextComponent(
+                rightPageText,
+                originalRightText
             );
         }
-
-        CommitPage(
-            pageLines,
-            pages
-        );
 
         return pages;
     }
 
     /// <summary>
-    /// Unicode文字列を書記素単位へ分解します。
-    ///
-    /// 絵文字や結合文字を途中で分割しにくくします。
+    /// 候補文字列が収まるかを二分探索し、
+    /// 収まる最大の書記素境界を返します。
     /// </summary>
-    private static List<string> GetTextElements(
-        string text
+    private static int FindLargestFittingEnd(
+        string text,
+        int[] elementBoundaries,
+        int startElementIndex,
+        int elementCount,
+        TMP_Text measurementText
     )
     {
-        List<string> elements =
-            new List<string>(text.Length);
+        int low = startElementIndex + 1;
+        int high = elementCount;
+        int best = startElementIndex;
 
-        TextElementEnumerator enumerator =
-            StringInfo.GetTextElementEnumerator(text);
-
-        while (enumerator.MoveNext())
+        while (low <= high)
         {
-            elements.Add(
-                enumerator.GetTextElement()
+            int middle =
+                low + (high - low) / 2;
+
+            bool fits =
+                FitsInTextContainer(
+                    text,
+                    elementBoundaries,
+                    startElementIndex,
+                    middle,
+                    measurementText
+                );
+
+            if (fits)
+            {
+                best = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return best;
+    }
+
+    private static bool FitsInTextContainer(
+        string text,
+        int[] elementBoundaries,
+        int startElementIndex,
+        int endElementIndex,
+        TMP_Text measurementText
+    )
+    {
+        int startCharacterIndex =
+            elementBoundaries[
+                startElementIndex
+            ];
+
+        int endCharacterIndex =
+            elementBoundaries[
+                endElementIndex
+            ];
+
+        string candidateText =
+            text.Substring(
+                startCharacterIndex,
+                endCharacterIndex -
+                startCharacterIndex
             );
+
+        measurementText.text = candidateText;
+
+        measurementText.ForceMeshUpdate(
+            ignoreActiveState: true,
+            forceTextReparsing: true
+        );
+
+        if (measurementText.isTextOverflowing)
+        {
+            return false;
         }
 
-        return elements;
+        Rect textRect =
+            measurementText.rectTransform.rect;
+
+        Vector4 margin =
+            measurementText.margin;
+
+        float availableWidth =
+            Mathf.Max(
+                0f,
+                textRect.width -
+                margin.x -
+                margin.z
+            );
+
+        float availableHeight =
+            Mathf.Max(
+                0f,
+                textRect.height -
+                margin.y -
+                margin.w
+            );
+
+        Vector2 renderedSize =
+            measurementText.GetRenderedValues(
+                onlyVisibleCharacters: false
+            );
+
+        return
+            renderedSize.x <=
+                availableWidth + BoundsTolerance &&
+            renderedSize.y <=
+                availableHeight + BoundsTolerance;
     }
 
     /// <summary>
-    /// 次行の先頭に置けない文字を現在行へ取り込みます。
+    /// ページ先頭の句読点やページ末尾の開き括弧を避けます。
+    /// 調整は後方へだけ行うため、調整後のページは必ず測定時の範囲内です。
     /// </summary>
-    private static void AbsorbProhibitedLineStartCharacters(
-        IReadOnlyList<string> textElements,
-        ref int index,
-        List<string> currentLine
+    private static int AdjustPageBoundaryForJapaneseText(
+        string text,
+        int[] elementBoundaries,
+        int startElementIndex,
+        int endElementIndex,
+        int elementCount
     )
     {
-        while (index < textElements.Count)
-        {
-            string nextElement =
-                textElements[index];
+        int adjustedEnd =
+            endElementIndex;
 
-            if (
-                nextElement == "\n" ||
-                nextElement == "\r"
-            )
-            {
-                return;
-            }
-
-            if (
-                !ProhibitedLineStartCharacters.Contains(
-                    nextElement
-                )
-            )
-            {
-                return;
-            }
-
-            currentLine.Add(nextElement);
-            index++;
-        }
-    }
-
-    /// <summary>
-    /// 行末に置けない文字を取り外し、次行へ引き継ぎます。
-    /// </summary>
-    private static List<string>
-        DetachProhibitedLineEndCharacters(
-            List<string> currentLine
+        while (
+            adjustedEnd >
+            startElementIndex + 1
         )
-    {
-        List<string> carryOver =
-            new List<string>();
-
-        /*
-         * 行が完全に空になるのを避けるため、
-         * 最低1文字は現在行に残します。
-         */
-        while (currentLine.Count > 1)
         {
             string lastElement =
-                currentLine[currentLine.Count - 1];
+                GetTextElement(
+                    text,
+                    elementBoundaries,
+                    adjustedEnd - 1
+                );
 
             if (
-                !ProhibitedLineEndCharacters.Contains(
+                !ProhibitedPageEndCharacters.Contains(
                     lastElement
                 )
             )
@@ -372,137 +361,284 @@ public static class BookPaginator
                 break;
             }
 
-            currentLine.RemoveAt(
-                currentLine.Count - 1
-            );
-
-            carryOver.Insert(
-                0,
-                lastElement
-            );
+            adjustedEnd--;
         }
 
-        return carryOver;
-    }
-
-    /// <summary>
-    /// 現在行をページ内の行として確定します。
-    /// </summary>
-    private static void CommitLine(
-        List<string> currentLine,
-        List<string> pageLines,
-        List<string> pages,
-        int linesPerPage,
-        bool allowEmptyLine
-    )
-    {
-        string line =
-            BuildString(currentLine)
-                .TrimEnd(' ', '\t');
-
-        currentLine.Clear();
-
-        if (line.Length == 0)
-        {
-            if (!allowEmptyLine)
-            {
-                return;
-            }
-
-            /*
-             * ページ先頭の空行と、
-             * 連続しすぎる空行は追加しません。
-             */
-            if (
-                pageLines.Count == 0 ||
-                pageLines[pageLines.Count - 1].Length == 0
-            )
-            {
-                return;
-            }
-        }
-
-        pageLines.Add(line);
-
-        if (pageLines.Count >= linesPerPage)
-        {
-            CommitPage(
-                pageLines,
-                pages
-            );
-        }
-    }
-
-    /// <summary>
-    /// ページ内の行を1ページの文字列として確定します。
-    /// </summary>
-    private static void CommitPage(
-        List<string> pageLines,
-        List<string> pages
-    )
-    {
-        if (pageLines.Count == 0)
-        {
-            return;
-        }
-
-        // ページ末尾の空行は削除します。
         while (
-            pageLines.Count > 0 &&
-            pageLines[pageLines.Count - 1].Length == 0
+            adjustedEnd >
+                startElementIndex + 1 &&
+            adjustedEnd <
+                elementCount
         )
         {
-            pageLines.RemoveAt(
-                pageLines.Count - 1
-            );
-        }
+            int nextVisibleElementIndex =
+                FindNextVisibleElementIndex(
+                    text,
+                    elementBoundaries,
+                    adjustedEnd,
+                    elementCount
+                );
 
-        if (pageLines.Count == 0)
-        {
-            return;
-        }
-
-        pages.Add(
-            string.Join(
-                "\n",
-                pageLines
+            if (
+                nextVisibleElementIndex >=
+                elementCount
             )
-        );
+            {
+                break;
+            }
 
-        pageLines.Clear();
+            string nextVisibleElement =
+                GetTextElement(
+                    text,
+                    elementBoundaries,
+                    nextVisibleElementIndex
+                );
+
+            if (
+                !ProhibitedPageStartCharacters.Contains(
+                    nextVisibleElement
+                )
+            )
+            {
+                break;
+            }
+
+            int movedEnd =
+                MoveBoundaryBeforePreviousVisibleElement(
+                    text,
+                    elementBoundaries,
+                    startElementIndex,
+                    adjustedEnd
+                );
+
+            if (movedEnd >= adjustedEnd)
+            {
+                break;
+            }
+
+            adjustedEnd = movedEnd;
+        }
+
+        return Mathf.Max(
+            startElementIndex + 1,
+            adjustedEnd
+        );
     }
 
-    private static string BuildString(
-        IEnumerable<string> elements
+    private static int MoveBoundaryBeforePreviousVisibleElement(
+        string text,
+        int[] elementBoundaries,
+        int startElementIndex,
+        int endElementIndex
     )
     {
-        StringBuilder builder =
-            new StringBuilder();
+        int candidate =
+            endElementIndex - 1;
 
-        foreach (string element in elements)
+        while (
+            candidate >
+            startElementIndex
+        )
         {
-            builder.Append(element);
+            string element =
+                GetTextElement(
+                    text,
+                    elementBoundaries,
+                    candidate
+                );
+
+            if (!IsPageBoundaryWhitespace(element))
+            {
+                return candidate;
+            }
+
+            candidate--;
         }
 
-        return builder.ToString();
+        return endElementIndex;
+    }
+
+    private static int FindNextVisibleElementIndex(
+        string text,
+        int[] elementBoundaries,
+        int startElementIndex,
+        int elementCount
+    )
+    {
+        int index = startElementIndex;
+
+        while (index < elementCount)
+        {
+            string element =
+                GetTextElement(
+                    text,
+                    elementBoundaries,
+                    index
+                );
+
+            if (!IsPageBoundaryWhitespace(element))
+            {
+                break;
+            }
+
+            index++;
+        }
+
+        return index;
+    }
+
+    private static int SkipPageLeadingWhitespace(
+        string text,
+        int[] elementBoundaries,
+        int startElementIndex,
+        int elementCount
+    )
+    {
+        int index = startElementIndex;
+
+        while (index < elementCount)
+        {
+            string element =
+                GetTextElement(
+                    text,
+                    elementBoundaries,
+                    index
+                );
+
+            if (!IsPageBoundaryWhitespace(element))
+            {
+                break;
+            }
+
+            index++;
+        }
+
+        return index;
     }
 
     /// <summary>
-    /// 半角系の空白か判定します。
-    ///
-    /// 全角スペース U+3000 は、
-    /// 日本語の段落字下げに使われるため対象外です。
+    /// ページ境界で削除してよい空白です。
+    /// 全角スペースは日本語段落の字下げとして残します。
     /// </summary>
-    private static bool IsCollapsibleWhitespace(
+    private static bool IsPageBoundaryWhitespace(
         string element
     )
     {
         return
             element == " " ||
             element == "\t" ||
-            element == "\f" ||
-            element == "\v" ||
+            element == "\r" ||
+            element == "\n" ||
             element == "\u00A0";
+    }
+
+    private static string TrimPageEnd(
+        string pageText
+    )
+    {
+        return pageText.TrimEnd(
+            ' ',
+            '\t',
+            '\r',
+            '\n',
+            '\u00A0'
+        );
+    }
+
+    private static string GetTextElement(
+        string text,
+        int[] elementBoundaries,
+        int elementIndex
+    )
+    {
+        int startIndex =
+            elementBoundaries[elementIndex];
+
+        int endIndex =
+            elementBoundaries[elementIndex + 1];
+
+        return text.Substring(
+            startIndex,
+            endIndex - startIndex
+        );
+    }
+
+    private static int[] BuildTextElementBoundaries(
+        string text
+    )
+    {
+        int[] elementStarts =
+            StringInfo.ParseCombiningCharacters(text);
+
+        int[] boundaries =
+            new int[elementStarts.Length + 1];
+
+        Array.Copy(
+            elementStarts,
+            boundaries,
+            elementStarts.Length
+        );
+
+        boundaries[boundaries.Length - 1] =
+            text.Length;
+
+        return boundaries;
+    }
+
+    private static void ValidateTextContainer(
+        TMP_Text textComponent,
+        string displayName
+    )
+    {
+        textComponent.rectTransform
+            .ForceUpdateRectTransforms();
+
+        Rect rect =
+            textComponent.rectTransform.rect;
+
+        Vector4 margin =
+            textComponent.margin;
+
+        float availableWidth =
+            rect.width -
+            margin.x -
+            margin.z;
+
+        float availableHeight =
+            rect.height -
+            margin.y -
+            margin.w;
+
+        if (
+            availableWidth <= 0f ||
+            availableHeight <= 0f
+        )
+        {
+            throw new InvalidOperationException(
+                displayName +
+                "のTextMeshPro表示領域が0以下です。" +
+                "RectTransformとMarginを確認してください。"
+            );
+        }
+    }
+
+    private static void RestoreTextComponent(
+        TMP_Text textComponent,
+        string originalText
+    )
+    {
+        if (textComponent == null)
+        {
+            return;
+        }
+
+        textComponent.text =
+            originalText ?? string.Empty;
+
+        textComponent.ForceMeshUpdate(
+            ignoreActiveState: true,
+            forceTextReparsing: true
+        );
     }
 
     private static string NormalizeText(
@@ -515,22 +651,18 @@ public static class BookPaginator
             .Replace('\t', ' ')
             .Replace('\u00A0', ' ');
 
-        // 半角空白だけをまとめます。
-        // 全角スペースは保持します。
         normalized = Regex.Replace(
             normalized,
             @"[ ]{2,}",
             " "
         );
 
-        // 改行の直前・直後にある半角空白を削除します。
         normalized = Regex.Replace(
             normalized,
             @" *\n *",
             "\n"
         );
 
-        // 空行は最大1行まで残します。
         normalized = Regex.Replace(
             normalized,
             @"\n{3,}",

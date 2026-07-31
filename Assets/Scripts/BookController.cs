@@ -15,9 +15,6 @@ public sealed class BookController : MonoBehaviour
     private const int PagesPerSpread = 2;
     private const int FirstEndlessBookPageNumber = 1;
 
-    /// <summary>
-    /// 前後に改行を入れるHTMLブロック要素です。
-    /// </summary>
     private static readonly HashSet<string>
         BlockElementNames =
             new HashSet<string>(
@@ -52,12 +49,7 @@ public sealed class BookController : MonoBehaviour
 
     /// <summary>
     /// 本文へ取り込まないHTML要素です。
-    ///
-    /// rt:
-    /// ルビの読み仮名です。
-    ///
-    /// rp:
-    /// ルビ非対応環境用の括弧です。
+    /// rtはルビの読み、rpはルビ非対応環境用の括弧です。
     /// </summary>
     private static readonly HashSet<string>
         IgnoredElementNames =
@@ -99,19 +91,6 @@ public sealed class BookController : MonoBehaviour
     [Tooltip("PageRendererコンポーネントを指定します。")]
     [SerializeField]
     private PageRenderer pageRenderer;
-
-    [Header("Pagination")]
-
-    [Tooltip(
-        "1行に配置する最大文字数です。" +
-        "禁則処理により数文字超える場合があります。"
-    )]
-    [SerializeField, Min(1)]
-    private int charactersPerLine = 38;
-
-    [Tooltip("1ページに配置する最大行数です。")]
-    [SerializeField, Min(1)]
-    private int linesPerPage = 16;
 
     [Header("Animation")]
 
@@ -170,18 +149,6 @@ public sealed class BookController : MonoBehaviour
 
     private void OnValidate()
     {
-        charactersPerLine =
-            Mathf.Max(
-                1,
-                charactersPerLine
-            );
-
-        linesPerPage =
-            Mathf.Max(
-                1,
-                linesPerPage
-            );
-
         openCloseTime =
             Mathf.Max(
                 0.01f,
@@ -316,7 +283,6 @@ public sealed class BookController : MonoBehaviour
             SetErrorState(
                 "EPUB Fileが設定されていません。"
             );
-
             return;
         }
 
@@ -332,7 +298,6 @@ public sealed class BookController : MonoBehaviour
                 "指定されたEPUBにデータがありません: " +
                 epubFile.OriginalFileName
             );
-
             return;
         }
 
@@ -351,15 +316,16 @@ public sealed class BookController : MonoBehaviour
                     "EPUBから表示可能な本文を抽出できませんでした: " +
                     epubFile.OriginalFileName
                 );
-
                 return;
             }
 
+            /*
+             * 固定文字数ではなく、左右ページのTextMeshProを
+             * 実際に測定してページを作ります。
+             */
             pages.AddRange(
-                BookPaginator.Paginate(
-                    fullBookContent,
-                    charactersPerLine,
-                    linesPerPage
+                pageRenderer.PaginateText(
+                    fullBookContent
                 )
             );
 
@@ -369,14 +335,10 @@ public sealed class BookController : MonoBehaviour
                     "EPUB本文をページへ分割できませんでした: " +
                     epubFile.OriginalFileName
                 );
-
                 return;
             }
 
-            /*
-             * 見開きの右ページが存在しない場合は、
-             * 最後に空ページを追加します。
-             */
+            // 最終見開きの右側がない場合は空ページを追加します。
             if (
                 pages.Count %
                 PagesPerSpread != 0
@@ -414,6 +376,11 @@ public sealed class BookController : MonoBehaviour
         operationVersion++;
         StopAllCoroutines();
 
+        if (pageRenderer != null)
+        {
+            pageRenderer.ReleaseGeneratedResources();
+        }
+
         pages.Clear();
         pageMaterialCache.Clear();
 
@@ -443,19 +410,13 @@ public sealed class BookController : MonoBehaviour
 
     private void HandleRightInput()
     {
-        if (
-            readerState ==
-            ReaderState.Closed
-        )
+        if (readerState == ReaderState.Closed)
         {
             OpenBook();
             return;
         }
 
-        if (
-            readerState ==
-            ReaderState.Open
-        )
+        if (readerState == ReaderState.Open)
         {
             TurnToNextSpread();
         }
@@ -463,10 +424,7 @@ public sealed class BookController : MonoBehaviour
 
     private void HandleLeftInput()
     {
-        if (
-            readerState !=
-            ReaderState.Open
-        )
+        if (readerState != ReaderState.Open)
         {
             return;
         }
@@ -544,18 +502,13 @@ public sealed class BookController : MonoBehaviour
         int targetSpreadIndex =
             currentSpreadIndex + 1;
 
-        if (
-            targetSpreadIndex >=
-            SpreadCount
-        )
+        if (targetSpreadIndex >= SpreadCount)
         {
             CloseBook();
             return;
         }
 
-        TurnToSpread(
-            targetSpreadIndex
-        );
+        TurnToSpread(targetSpreadIndex);
     }
 
     private void TurnToPreviousSpread()
@@ -569,9 +522,7 @@ public sealed class BookController : MonoBehaviour
             return;
         }
 
-        TurnToSpread(
-            targetSpreadIndex
-        );
+        TurnToSpread(targetSpreadIndex);
     }
 
     private void TurnToSpread(
@@ -588,7 +539,6 @@ public sealed class BookController : MonoBehaviour
                 targetSpreadIndex,
                 this
             );
-
             return;
         }
 
@@ -644,10 +594,8 @@ public sealed class BookController : MonoBehaviour
     private void CloseBook()
     {
         if (
-            readerState ==
-            ReaderState.Closed ||
-            readerState ==
-            ReaderState.Closing
+            readerState == ReaderState.Closed ||
+            readerState == ReaderState.Closing
         )
         {
             return;
@@ -736,13 +684,8 @@ public sealed class BookController : MonoBehaviour
                 );
             }
 
-            book.AddPageData(
-                leftMaterial
-            );
-
-            book.AddPageData(
-                rightMaterial
-            );
+            book.AddPageData(leftMaterial);
+            book.AddPageData(rightMaterial);
 
             addedSpreadCount++;
         }
@@ -845,12 +788,11 @@ public sealed class BookController : MonoBehaviour
         );
     }
 
-    private IEnumerator
-        CompleteOperationAfterDelay(
-            int operationId,
-            float delay,
-            ReaderState completedState
-        )
+    private IEnumerator CompleteOperationAfterDelay(
+        int operationId,
+        float delay,
+        ReaderState completedState
+    )
     {
         yield return
             new WaitForSecondsRealtime(
@@ -871,10 +813,7 @@ public sealed class BookController : MonoBehaviour
         ReaderState completedState
     )
     {
-        if (
-            operationId !=
-            operationVersion
-        )
+        if (operationId != operationVersion)
         {
             return;
         }
@@ -882,10 +821,7 @@ public sealed class BookController : MonoBehaviour
         readerState =
             completedState;
 
-        if (
-            completedState ==
-            ReaderState.Closed
-        )
+        if (completedState == ReaderState.Closed)
         {
             currentSpreadIndex = 0;
 
@@ -905,20 +841,15 @@ public sealed class BookController : MonoBehaviour
     {
         inputDevices.Clear();
 
-        InputDevices
-            .GetDevicesWithCharacteristics(
-                InputDeviceCharacteristics
-                    .Controller,
-                inputDevices
-            );
+        InputDevices.GetDevicesWithCharacteristics(
+            InputDeviceCharacteristics.Controller,
+            inputDevices
+        );
 
         bool primaryButtonPressed = false;
         bool secondaryButtonPressed = false;
 
-        foreach (
-            InputDevice device
-            in inputDevices
-        )
+        foreach (InputDevice device in inputDevices)
         {
             if (
                 device.TryGetFeatureValue(
@@ -958,9 +889,7 @@ public sealed class BookController : MonoBehaviour
             secondaryButtonPressed;
     }
 
-    private void SetErrorState(
-        string message
-    )
+    private void SetErrorState(string message)
     {
         operationVersion++;
         StopAllCoroutines();
@@ -977,9 +906,7 @@ public sealed class BookController : MonoBehaviour
     /// <summary>
     /// EPUBのReadingOrderに含まれる本文を結合します。
     /// </summary>
-    private string ExtractContent(
-        EpubBook epubBook
-    )
+    private string ExtractContent(EpubBook epubBook)
     {
         if (epubBook == null)
         {
@@ -990,8 +917,7 @@ public sealed class BookController : MonoBehaviour
             new StringBuilder();
 
         foreach (
-            EpubLocalTextContentFile
-                textContentFile
+            EpubLocalTextContentFile textContentFile
             in epubBook.ReadingOrder
         )
         {
@@ -1031,8 +957,7 @@ public sealed class BookController : MonoBehaviour
     /// XHTMLのbodyから本文を抽出します。
     /// </summary>
     private string ExtractPlainText(
-        EpubLocalTextContentFile
-            textContentFile
+        EpubLocalTextContentFile textContentFile
     )
     {
         if (
@@ -1052,10 +977,6 @@ public sealed class BookController : MonoBehaviour
             textContentFile.Content
         );
 
-        /*
-         * head内のtitleやメタデータを本文へ入れないため、
-         * bodyが存在する場合はbodyだけを処理します。
-         */
         HtmlNode rootNode =
             htmlDocument.DocumentNode
                 .SelectSingleNode("//body")
@@ -1074,9 +995,6 @@ public sealed class BookController : MonoBehaviour
         );
     }
 
-    /// <summary>
-    /// HTMLノードを再帰的に処理します。
-    /// </summary>
     private void AppendNodeText(
         HtmlNode node,
         StringBuilder builder
@@ -1087,10 +1005,7 @@ public sealed class BookController : MonoBehaviour
             return;
         }
 
-        if (
-            node.NodeType ==
-            HtmlNodeType.Comment
-        )
+        if (node.NodeType == HtmlNodeType.Comment)
         {
             return;
         }
@@ -1098,30 +1013,17 @@ public sealed class BookController : MonoBehaviour
         string nodeName =
             node.Name ?? string.Empty;
 
-        /*
-         * script、styleに加えて、
-         * ルビの読みであるrtと、
-         * ルビ用括弧であるrpを除外します。
-         */
-        if (
-            IgnoredElementNames.Contains(
-                nodeName
-            )
-        )
+        if (IgnoredElementNames.Contains(nodeName))
         {
             return;
         }
 
-        if (
-            node.NodeType ==
-            HtmlNodeType.Text
-        )
+        if (node.NodeType == HtmlNodeType.Text)
         {
             AppendTextNode(
                 node.InnerText,
                 builder
             );
-
             return;
         }
 
@@ -1132,12 +1034,10 @@ public sealed class BookController : MonoBehaviour
             )
         )
         {
-            // EPUB内の明示的な改行です。
             AppendLineBreaks(
                 builder,
                 requiredCount: 1
             );
-
             return;
         }
 
@@ -1152,14 +1052,11 @@ public sealed class BookController : MonoBehaviour
                 builder,
                 requiredCount: 2
             );
-
             return;
         }
 
         bool isBlockElement =
-            BlockElementNames.Contains(
-                nodeName
-            );
+            BlockElementNames.Contains(nodeName);
 
         if (isBlockElement)
         {
@@ -1169,10 +1066,7 @@ public sealed class BookController : MonoBehaviour
             );
         }
 
-        foreach (
-            HtmlNode childNode
-            in node.ChildNodes
-        )
+        foreach (HtmlNode childNode in node.ChildNodes)
         {
             AppendNodeText(
                 childNode,
@@ -1189,9 +1083,6 @@ public sealed class BookController : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// HTMLのテキストノードを本文へ追加します。
-    /// </summary>
     private void AppendTextNode(
         string rawText,
         StringBuilder builder
@@ -1203,18 +1094,12 @@ public sealed class BookController : MonoBehaviour
         }
 
         string decodedText =
-            HtmlEntity
-                .DeEntitize(rawText)
-                .Replace(
-                    '\u00A0',
-                    ' '
-                );
+            HtmlEntity.DeEntitize(rawText)
+                .Replace('\u00A0', ' ');
 
         bool hadLeadingAsciiWhitespace =
             decodedText.Length > 0 &&
-            IsAsciiWhitespace(
-                decodedText[0]
-            );
+            IsAsciiWhitespace(decodedText[0]);
 
         bool hadTrailingAsciiWhitespace =
             decodedText.Length > 0 &&
@@ -1225,10 +1110,8 @@ public sealed class BookController : MonoBehaviour
             );
 
         /*
-         * 半角空白、タブ、XHTMLソース内の改行だけを
-         * 1個の半角空白へまとめます。
-         *
-         * 全角スペースは段落の字下げとして保持します。
+         * XHTMLソースの整形用改行と半角空白だけをまとめます。
+         * 全角スペースは日本語段落の字下げとして保持します。
          */
         string normalizedText =
             Regex.Replace(
@@ -1258,9 +1141,7 @@ public sealed class BookController : MonoBehaviour
             builder.Append(' ');
         }
 
-        builder.Append(
-            normalizedText
-        );
+        builder.Append(normalizedText);
 
         if (hadTrailingAsciiWhitespace)
         {
@@ -1280,12 +1161,6 @@ public sealed class BookController : MonoBehaviour
             character == '\f';
     }
 
-    /// <summary>
-    /// 末尾へ必要数の改行を追加します。
-    ///
-    /// requiredCountが1なら通常改行、
-    /// 2なら空行を1行作ります。
-    /// </summary>
     private static void AppendLineBreaks(
         StringBuilder builder,
         int requiredCount
@@ -1321,8 +1196,7 @@ public sealed class BookController : MonoBehaviour
         int existingCount = 0;
 
         for (
-            int index =
-                builder.Length - 1;
+            int index = builder.Length - 1;
             index >= 0;
             index--
         )
@@ -1335,10 +1209,7 @@ public sealed class BookController : MonoBehaviour
             existingCount++;
         }
 
-        while (
-            existingCount <
-            requiredCount
-        )
+        while (existingCount < requiredCount)
         {
             builder.Append('\n');
             existingCount++;
@@ -1359,10 +1230,6 @@ public sealed class BookController : MonoBehaviour
             .Replace('\r', '\n')
             .Replace('\u00A0', ' ');
 
-        /*
-         * 半角空白だけをまとめます。
-         * 全角スペースは保持します。
-         */
         normalized = Regex.Replace(
             normalized,
             @"[ \t]+",
