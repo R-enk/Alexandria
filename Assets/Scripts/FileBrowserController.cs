@@ -1,23 +1,22 @@
+using System;
 using System.Collections;
-using UnityEngine;
-using SimpleFileBrowser; // Ensure you have the correct namespace
 using System.IO;
+using SimpleFileBrowser;
+using UnityEngine;
 
 public class FileBrowserController : MonoBehaviour
 {
-    public GameObject buttonCanvas; // Assign your button canvas here in the inspector
-    public GameObject fileBrowserCanvas; // Assign your button canvas here in the inspector
+    [Header("UI")]
+    public GameObject buttonCanvas;
+    public GameObject fileBrowserCanvas;
 
-    public GameObject book; // Assign your epub reader here in the inspector
-    // Call this function when the button is clicked
+    [Header("Book")]
+    public GameObject book;
+    public BookController bookController;
+
     public void OpenFileBrowser()
     {
-        // Hide the button canvas
-        if (buttonCanvas != null)
-            buttonCanvas.SetActive(false);
-        if (fileBrowserCanvas != null)
-            fileBrowserCanvas.SetActive(true);
-
+        SetCanvasState(showButtonCanvas: false, showFileBrowserCanvas: true);
         StartCoroutine(ShowLoadDialogCoroutine());
     }
 
@@ -25,54 +24,201 @@ public class FileBrowserController : MonoBehaviour
     {
         Debug.Log("Opening file browser");
 
-        // Set default filter (optional)
         FileBrowser.SetDefaultFilter(".epub");
 
-        // // Show the file browser and wait for a response from the user
-        // // Only allow the selection of a single file
-        yield return FileBrowser.WaitForLoadDialog(FileBrowser.PickMode.Files, false, null, null, "Load Epub", "Load");
+        yield return FileBrowser.WaitForLoadDialog(
+            FileBrowser.PickMode.Files,
+            false,
+            null,
+            null,
+            "Load EPUB",
+            "Load"
+        );
 
-        // yield return FileBrowser.WaitForLoadDialog(FileBrowser.PickMode.Files, false, null, null, "Load Epub", "Load");
-
-        // Dialog is closed
-        // Check if the user selected a file
-        if (FileBrowser.Success)
+        if (!FileBrowser.Success || FileBrowser.Result.Length == 0)
         {
-            // Get the path of the selected file
-            string filePath = FileBrowser.Result[0];
-
-            // Copy the selected file to the StreamingAssets folder
-            CopyFileToStreamingAssets(filePath);
+            Debug.Log("User canceled file browser");
+            ShowFileSelectionButton();
+            yield break;
         }
-        else Debug.Log("User canceled file browser");
+
+        PrepareAndLoadEpub(FileBrowser.Result[0]);
     }
 
-    private void CopyFileToStreamingAssets(string filePath)
+    private void PrepareAndLoadEpub(string sourcePath)
     {
-        string destinationPath = Path.Combine(Application.streamingAssetsPath, Path.GetFileName(filePath));
+        if (string.IsNullOrWhiteSpace(sourcePath))
+        {
+            Debug.LogError("The selected EPUB path is empty.");
+            ShowFileSelectionButton();
+            return;
+        }
 
-        Debug.Log("Destination path: " + destinationPath);
+        if (
+            !string.Equals(
+                Path.GetExtension(sourcePath),
+                ".epub",
+                StringComparison.OrdinalIgnoreCase
+            )
+        )
+        {
+            Debug.LogError("The selected file is not an EPUB: " + sourcePath);
+            ShowFileSelectionButton();
+            return;
+        }
+
         try
         {
-            if (!Directory.Exists(Application.streamingAssetsPath))
-                Directory.CreateDirectory(Application.streamingAssetsPath);
-
-
-
-            File.Copy(filePath, destinationPath, true);
-            if (book != null)
+            string sourceFullPath = Path.GetFullPath(sourcePath);
+            if (!File.Exists(sourceFullPath))
             {
-                book.SetActive(true);
+                Debug.LogError(
+                    "The selected EPUB was not found: " + sourceFullPath
+                );
+                ShowFileSelectionButton();
+                return;
             }
-            Debug.Log("File copied to StreamingAssets: " + destinationPath);
+
+            // Runtime-imported files belong in persistentDataPath.
+            // StreamingAssets can be read-only, especially in Android builds.
+            string importDirectory = Path.Combine(
+                Application.persistentDataPath,
+                "ImportedBooks"
+            );
+            Directory.CreateDirectory(importDirectory);
+
+            string destinationFullPath = Path.GetFullPath(
+                Path.Combine(
+                    importDirectory,
+                    Path.GetFileName(sourceFullPath)
+                )
+            );
+
+            Debug.Log("Source path: " + sourceFullPath);
+            Debug.Log("Destination path: " + destinationFullPath);
+
+            if (
+                !string.Equals(
+                    sourceFullPath,
+                    destinationFullPath,
+                    StringComparison.OrdinalIgnoreCase
+                )
+            )
+            {
+                File.Copy(
+                    sourceFullPath,
+                    destinationFullPath,
+                    true
+                );
+                Debug.Log(
+                    "EPUB copied to the import folder: "
+                    + destinationFullPath
+                );
+            }
+            else
+            {
+                Debug.Log(
+                    "The selected EPUB is already in the import folder."
+                );
+            }
+
+            BookController controller = ResolveBookController();
+            if (controller == null)
+            {
+                Debug.LogError(
+                    "BookController was not found. "
+                    + "Assign Book Controller or Book in the Inspector."
+                );
+                ShowFileSelectionButton();
+                return;
+            }
+
+            bool loaded = controller.LoadEpubFromPath(
+                destinationFullPath
+            );
+
+            if (loaded)
+            {
+                HideFileUi();
+            }
+            else
+            {
+                ShowFileSelectionButton();
+            }
         }
-        catch (System.Exception ex)
+        catch (Exception ex)
         {
-            if (book != null)
+            Debug.LogError(
+                "Error preparing EPUB: "
+                + ex.GetType().Name
+                + ": "
+                + ex.Message
+            );
+            ShowFileSelectionButton();
+        }
+    }
+
+    private BookController ResolveBookController()
+    {
+        if (bookController != null)
+        {
+            if (!bookController.gameObject.activeSelf)
             {
-                book.SetActive(true);
+                bookController.gameObject.SetActive(true);
             }
-            Debug.LogError("Error copying file: " + ex.Message);
+
+            return bookController;
+        }
+
+        if (book == null)
+        {
+            return null;
+        }
+
+        if (!book.activeSelf)
+        {
+            book.SetActive(true);
+        }
+
+        bookController = book.GetComponent<BookController>();
+        if (bookController == null)
+        {
+            bookController =
+                book.GetComponentInChildren<BookController>(true);
+        }
+
+        return bookController;
+    }
+
+    private void ShowFileSelectionButton()
+    {
+        SetCanvasState(
+            showButtonCanvas: true,
+            showFileBrowserCanvas: false
+        );
+    }
+
+    private void HideFileUi()
+    {
+        SetCanvasState(
+            showButtonCanvas: false,
+            showFileBrowserCanvas: false
+        );
+    }
+
+    private void SetCanvasState(
+        bool showButtonCanvas,
+        bool showFileBrowserCanvas
+    )
+    {
+        if (buttonCanvas != null)
+        {
+            buttonCanvas.SetActive(showButtonCanvas);
+        }
+
+        if (fileBrowserCanvas != null)
+        {
+            fileBrowserCanvas.SetActive(showFileBrowserCanvas);
         }
     }
 }
