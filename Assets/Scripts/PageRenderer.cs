@@ -4,8 +4,8 @@ using TMPro;
 using UnityEngine;
 
 /// <summary>
-/// TextMeshProの文字列をページ専用Texture2Dへ焼き込み、
-/// EndlessBookで使用するMaterialを生成します。
+/// TextMeshProを使って本文のページ分割位置を測定し、
+/// 各ページを専用Texture2Dへ焼き込んでEndlessBook用Materialを生成します。
 /// </summary>
 public sealed class PageRenderer : MonoBehaviour
 {
@@ -34,7 +34,8 @@ public sealed class PageRenderer : MonoBehaviour
     [Header("Material")]
 
     [Tooltip(
-        "ページ用Materialのテンプレートです。未設定の場合はUnlit/Textureを使用します。"
+        "ページ用Materialのテンプレートです。" +
+        "未設定の場合はUnlit/Textureを使用します。"
     )]
     [SerializeField]
     private Material pageMaterialTemplate;
@@ -50,7 +51,10 @@ public sealed class PageRenderer : MonoBehaviour
 
     private void Awake()
     {
-        ValidateReferences(logErrors: true);
+        if (ValidateReferences(logErrors: true))
+        {
+            ConfigureTextComponents();
+        }
     }
 
     private void OnDestroy()
@@ -98,9 +102,28 @@ public sealed class PageRenderer : MonoBehaviour
             logErrors
         );
 
+        if (leftPageTextComponent != null)
+        {
+            isValid &= ValidateTextArea(
+                leftPageTextComponent,
+                "Left Page Text Component",
+                logErrors
+            );
+        }
+
+        if (rightPageTextComponent != null)
+        {
+            isValid &= ValidateTextArea(
+                rightPageTextComponent,
+                "Right Page Text Component",
+                logErrors
+            );
+        }
+
         if (pageMaterialTemplate == null)
         {
-            fallbackShader = Shader.Find("Unlit/Texture");
+            fallbackShader =
+                Shader.Find("Unlit/Texture");
 
             if (fallbackShader == null)
             {
@@ -118,6 +141,51 @@ public sealed class PageRenderer : MonoBehaviour
         }
 
         return isValid;
+    }
+
+    /// <summary>
+    /// 左右ページのTextMeshPro表示領域を交互に測定し、
+    /// 実際に収まる位置で本文をページへ分割します。
+    /// </summary>
+    public List<string> PaginateText(
+        string sourceText
+    )
+    {
+        if (!ValidateReferences(logErrors: true))
+        {
+            throw new InvalidOperationException(
+                "PageRendererの必須参照が設定されていません。"
+            );
+        }
+
+        ConfigureTextComponents();
+
+        string previousLeftText =
+            leftPageTextComponent.text;
+
+        string previousRightText =
+            rightPageTextComponent.text;
+
+        try
+        {
+            return BookPaginator.Paginate(
+                sourceText,
+                leftPageTextComponent,
+                rightPageTextComponent
+            );
+        }
+        finally
+        {
+            RestoreTextComponent(
+                leftPageTextComponent,
+                previousLeftText
+            );
+
+            RestoreTextComponent(
+                rightPageTextComponent,
+                previousRightText
+            );
+        }
     }
 
     public Material RenderLeftPageToMaterial(
@@ -149,14 +217,24 @@ public sealed class PageRenderer : MonoBehaviour
     }
 
     // 既存コードとの互換用オーバーロードです。
-    public Material RenderLeftPageToMaterial(string text)
+    public Material RenderLeftPageToMaterial(
+        string text
+    )
     {
-        return RenderLeftPageToMaterial(text, "LeftPage");
+        return RenderLeftPageToMaterial(
+            text,
+            "LeftPage"
+        );
     }
 
-    public Material RenderRightPageToMaterial(string text)
+    public Material RenderRightPageToMaterial(
+        string text
+    )
     {
-        return RenderRightPageToMaterial(text, "RightPage");
+        return RenderRightPageToMaterial(
+            text,
+            "RightPage"
+        );
     }
 
     public void ReleaseGeneratedResources()
@@ -168,12 +246,18 @@ public sealed class PageRenderer : MonoBehaviour
 
         resourcesReleased = true;
 
-        foreach (Material material in generatedMaterials)
+        foreach (
+            Material material
+            in generatedMaterials
+        )
         {
             DestroyRuntimeObject(material);
         }
 
-        foreach (Texture2D texture in generatedTextures)
+        foreach (
+            Texture2D texture
+            in generatedTextures
+        )
         {
             DestroyRuntimeObject(texture);
         }
@@ -199,15 +283,37 @@ public sealed class PageRenderer : MonoBehaviour
 
         resourcesReleased = false;
 
-        string safeName = string.IsNullOrWhiteSpace(resourceName)
-            ? "Page"
-            : resourceName;
+        ConfigureTextComponent(
+            textComponent
+        );
 
-        textComponent.text = text ?? string.Empty;
+        string safeName =
+            string.IsNullOrWhiteSpace(
+                resourceName
+            )
+                ? "Page"
+                : resourceName;
+
+        textComponent.text =
+            text ?? string.Empty;
+
         textComponent.ForceMeshUpdate(
             ignoreActiveState: true,
             forceTextReparsing: true
         );
+
+        if (
+            textComponent.isTextOverflowing ||
+            textComponent.isTextTruncated
+        )
+        {
+            Debug.LogWarning(
+                safeName +
+                "の本文がTextMeshPro表示領域を超えています。" +
+                "フォントやTextMeshProの領域が分割時から変更されていないか確認してください。",
+                this
+            );
+        }
 
         if (!renderTexture.IsCreated())
         {
@@ -225,23 +331,32 @@ public sealed class PageRenderer : MonoBehaviour
 
         try
         {
-            renderCamera.targetTexture = renderTexture;
+            renderCamera.targetTexture =
+                renderTexture;
+
             renderCamera.Render();
 
-            RenderTexture.active = renderTexture;
+            RenderTexture.active =
+                renderTexture;
 
-            pageTexture = new Texture2D(
-                renderTexture.width,
-                renderTexture.height,
-                TextureFormat.RGBA32,
-                mipChain: false,
-                linear: false
-            )
-            {
-                name = safeName + "_Texture",
-                filterMode = FilterMode.Bilinear,
-                wrapMode = TextureWrapMode.Clamp
-            };
+            pageTexture =
+                new Texture2D(
+                    renderTexture.width,
+                    renderTexture.height,
+                    TextureFormat.RGBA32,
+                    mipChain: false,
+                    linear: false
+                )
+                {
+                    name =
+                        safeName + "_Texture",
+
+                    filterMode =
+                        FilterMode.Bilinear,
+
+                    wrapMode =
+                        TextureWrapMode.Clamp
+                };
 
             pageTexture.ReadPixels(
                 new Rect(
@@ -260,17 +375,22 @@ public sealed class PageRenderer : MonoBehaviour
                 makeNoLongerReadable: true
             );
 
-            Material sourceMaterial = pageMaterialTemplate;
+            Material sourceMaterial =
+                pageMaterialTemplate;
 
             if (sourceMaterial != null)
             {
-                pageMaterial = new Material(sourceMaterial);
+                pageMaterial =
+                    new Material(sourceMaterial);
             }
             else
             {
                 if (fallbackShader == null)
                 {
-                    fallbackShader = Shader.Find("Unlit/Texture");
+                    fallbackShader =
+                        Shader.Find(
+                            "Unlit/Texture"
+                        );
                 }
 
                 if (fallbackShader == null)
@@ -280,14 +400,25 @@ public sealed class PageRenderer : MonoBehaviour
                     );
                 }
 
-                pageMaterial = new Material(fallbackShader);
+                pageMaterial =
+                    new Material(
+                        fallbackShader
+                    );
             }
 
-            pageMaterial.name = safeName + "_Material";
-            pageMaterial.mainTexture = pageTexture;
+            pageMaterial.name =
+                safeName + "_Material";
 
-            generatedTextures.Add(pageTexture);
-            generatedMaterials.Add(pageMaterial);
+            pageMaterial.mainTexture =
+                pageTexture;
+
+            generatedTextures.Add(
+                pageTexture
+            );
+
+            generatedMaterials.Add(
+                pageMaterial
+            );
 
             return pageMaterial;
         }
@@ -295,27 +426,124 @@ public sealed class PageRenderer : MonoBehaviour
         {
             if (
                 pageMaterial != null &&
-                !generatedMaterials.Contains(pageMaterial)
+                !generatedMaterials.Contains(
+                    pageMaterial
+                )
             )
             {
-                DestroyRuntimeObject(pageMaterial);
+                DestroyRuntimeObject(
+                    pageMaterial
+                );
             }
 
             if (
                 pageTexture != null &&
-                !generatedTextures.Contains(pageTexture)
+                !generatedTextures.Contains(
+                    pageTexture
+                )
             )
             {
-                DestroyRuntimeObject(pageTexture);
+                DestroyRuntimeObject(
+                    pageTexture
+                );
             }
 
             throw;
         }
         finally
         {
-            renderCamera.targetTexture = previousCameraTarget;
-            RenderTexture.active = previousActiveTexture;
+            renderCamera.targetTexture =
+                previousCameraTarget;
+
+            RenderTexture.active =
+                previousActiveTexture;
         }
+    }
+
+    private void ConfigureTextComponents()
+    {
+        ConfigureTextComponent(
+            leftPageTextComponent
+        );
+
+        ConfigureTextComponent(
+            rightPageTextComponent
+        );
+    }
+
+    /// <summary>
+    /// 測定時と描画時で同じレイアウト条件を使用します。
+    /// Auto Sizeを無効化し、TextMeshPro自身の自動折り返しを有効にします。
+    /// </summary>
+    private static void ConfigureTextComponent(
+        TMP_Text textComponent
+    )
+    {
+        if (textComponent == null)
+        {
+            return;
+        }
+
+        textComponent.enableAutoSizing =
+            false;
+
+        textComponent.enableWordWrapping =
+            true;
+
+        textComponent.overflowMode =
+            TextOverflowModes.Truncate;
+
+        textComponent.richText =
+            false;
+    }
+
+    private static void RestoreTextComponent(
+        TMP_Text textComponent,
+        string previousText
+    )
+    {
+        if (textComponent == null)
+        {
+            return;
+        }
+
+        textComponent.text =
+            previousText ?? string.Empty;
+
+        textComponent.ForceMeshUpdate(
+            ignoreActiveState: true,
+            forceTextReparsing: true
+        );
+    }
+
+    private bool ValidateTextArea(
+        TMP_Text textComponent,
+        string fieldName,
+        bool logErrors
+    )
+    {
+        Rect textRect =
+            textComponent.rectTransform.rect;
+
+        if (
+            textRect.width > 0.01f &&
+            textRect.height > 0.01f
+        )
+        {
+            return true;
+        }
+
+        if (logErrors)
+        {
+            Debug.LogError(
+                "PageRendererの" +
+                fieldName +
+                "の表示領域の幅または高さが0です。",
+                this
+            );
+        }
+
+        return false;
     }
 
     private bool ValidateReference(
@@ -332,7 +560,8 @@ public sealed class PageRenderer : MonoBehaviour
         if (logErrors)
         {
             Debug.LogError(
-                "PageRendererの" + fieldName +
+                "PageRendererの" +
+                fieldName +
                 "が設定されていません。",
                 this
             );
@@ -352,11 +581,15 @@ public sealed class PageRenderer : MonoBehaviour
 
         if (Application.isPlaying)
         {
-            UnityEngine.Object.Destroy(target);
+            UnityEngine.Object.Destroy(
+                target
+            );
         }
         else
         {
-            UnityEngine.Object.DestroyImmediate(target);
+            UnityEngine.Object.DestroyImmediate(
+                target
+            );
         }
     }
 }
