@@ -6,16 +6,19 @@ using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.XR;
 
+#if ENABLE_INPUT_SYSTEM
+using InputSystemApi = UnityEngine.InputSystem.InputSystem;
+using InputSystemButtonControl = UnityEngine.InputSystem.Controls.ButtonControl;
+using InputSystemXRController = UnityEngine.InputSystem.XR.XRController;
+#endif
+
 /// <summary>
-/// Meta XR Interaction SDK の RayInteractable と既存の BookController を接続します。
+/// Meta XR Interaction SDK の RayInteractable と BookController を接続します。
 ///
-/// ・Ray が本に Hover していない間は、BookController の A/X・B/Y 入力を抑止します。
+/// ・Ray が本に Hover している間だけ、A/X・B/Y入力を受け付けます。
+/// ・Unity Input System の XRController と Meta の OVRInput の両方を確認します。
 /// ・Ray の Select（通常は Trigger）から本を開く／ページを送ることもできます。
-/// ・Meta XR SDK の型を直接参照しないため、SDK がない環境でもコンパイルできます。
-///
-/// 本または子オブジェクトには、Meta XR Interaction SDK の
-/// Collider、ColliderSurface、RayInteractable、
-/// InteractableUnityEventWrapper を設定してください。
+/// ・Meta XR SDK の型はReflectionで取得するため、SDKがない環境でもコンパイルできます。
 /// </summary>
 [DefaultExecutionOrder(-1000)]
 [DisallowMultipleComponent]
@@ -39,36 +42,264 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         public UnityAction SelectAction;
     }
 
+    /// <summary>
+    /// OVRInputを直接参照せずにButton.One / Button.Twoを読み取ります。
+    /// Meta XR SDKが存在しない場合は利用不可として扱います。
+    /// </summary>
+    private sealed class OvrInputReflectionReader
+    {
+        private bool initialized;
+        private bool available;
+        private MethodInfo getMethod;
+        private object buttonOne;
+        private object buttonTwo;
+        private object touchController;
+
+        public bool IsAvailable
+        {
+            get
+            {
+                EnsureInitialized();
+                return available;
+            }
+        }
+
+        public bool TryRead(
+            out bool primaryPressed,
+            out bool secondaryPressed
+        )
+        {
+            primaryPressed = false;
+            secondaryPressed = false;
+
+            EnsureInitialized();
+
+            if (!available)
+            {
+                return false;
+            }
+
+            try
+            {
+                primaryPressed =
+                    (bool)getMethod.Invoke(
+                        null,
+                        new[]
+                        {
+                            buttonOne,
+                            touchController
+                        }
+                    );
+
+                secondaryPressed =
+                    (bool)getMethod.Invoke(
+                        null,
+                        new[]
+                        {
+                            buttonTwo,
+                            touchController
+                        }
+                    );
+
+                return true;
+            }
+            catch
+            {
+                available = false;
+                return false;
+            }
+        }
+
+        private void EnsureInitialized()
+        {
+            if (initialized)
+            {
+                return;
+            }
+
+            initialized = true;
+
+            Type ovrInputType = null;
+
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                ovrInputType = assembly.GetType(
+                    "OVRInput",
+                    throwOnError: false
+                );
+
+                if (ovrInputType != null)
+                {
+                    break;
+                }
+            }
+
+            if (ovrInputType == null)
+            {
+                return;
+            }
+
+            Type buttonType =
+                ovrInputType.GetNestedType(
+                    "Button",
+                    BindingFlags.Public
+                );
+
+            Type controllerType =
+                ovrInputType.GetNestedType(
+                    "Controller",
+                    BindingFlags.Public
+                );
+
+            if (buttonType == null || controllerType == null)
+            {
+                return;
+            }
+
+            foreach (
+                MethodInfo method
+                in ovrInputType.GetMethods(
+                    BindingFlags.Public |
+                    BindingFlags.Static
+                )
+            )
+            {
+                if (
+                    method.Name != "Get" ||
+                    method.ReturnType != typeof(bool)
+                )
+                {
+                    continue;
+                }
+
+                ParameterInfo[] parameters =
+                    method.GetParameters();
+
+                if (
+                    parameters.Length == 2 &&
+                    parameters[0].ParameterType == buttonType &&
+                    parameters[1].ParameterType == controllerType
+                )
+                {
+                    getMethod = method;
+                    break;
+                }
+            }
+
+            if (getMethod == null)
+            {
+                return;
+            }
+
+            try
+            {
+                buttonOne = Enum.Parse(
+                    buttonType,
+                    "One"
+                );
+
+                buttonTwo = Enum.Parse(
+                    buttonType,
+                    "Two"
+                );
+
+                touchController = Enum.Parse(
+                    controllerType,
+                    "Touch"
+                );
+
+                available = true;
+            }
+            catch
+            {
+                available = false;
+            }
+        }
+    }
+
     [Header("Book")]
-    [Tooltip("操作対象の BookController です。未設定なら同じオブジェクトか親から取得します。")]
+
+    [Tooltip(
+        "操作対象のBookControllerです。別オブジェクトにある場合は必ず指定してください。"
+    )]
     [SerializeField]
     private BookController bookController;
 
     [Header("Meta XR Interaction SDK")]
-    [Tooltip("このオブジェクトと子オブジェクトの InteractableUnityEventWrapper を自動検出します。")]
+
+    [Tooltip(
+        "このオブジェクトと子オブジェクトのInteractableUnityEventWrapperを自動検出します。"
+    )]
     [SerializeField]
     private bool autoBindMetaEventWrappers = true;
 
-    [Tooltip("Ray の Select（通常は Trigger）で実行する操作です。")]
+    [Tooltip("RayのSelect（通常はTrigger）で実行する操作です。")]
     [SerializeField]
-    private RaySelectAction selectAction = RaySelectAction.NextOrOpen;
+    private RaySelectAction selectAction =
+        RaySelectAction.NextOrOpen;
 
-    [Tooltip("実行中に追加された Meta XR コンポーネントを再検索する間隔です。")]
+    [Tooltip(
+        "実行中に追加されたMeta XRコンポーネントを再検索する間隔です。"
+    )]
     [SerializeField, Min(0.1f)]
     private float rescanInterval = 1.0f;
 
+    [Header("Controller Buttons")]
+
+    [Tooltip(
+        "Unity Input SystemのXRControllerからA/X・B/Yを読み取ります。"
+    )]
+    [SerializeField]
+    private bool enableInputSystemControllerButtons = true;
+
+    [Tooltip(
+        "Meta OVRInputのButton.One / Button.Twoもフォールバックとして読み取ります。"
+    )]
+    [SerializeField]
+    private bool enableOvrInputFallback = true;
+
     [Header("Input Gate")]
-    [Tooltip("Ray が本に当たっていない間、既存 BookController のコントローラーボタン入力を抑止します。")]
+
+    [Tooltip(
+        "Rayが本に当たっていない間、BookControllerの従来XR入力を抑止します。"
+    )]
     [SerializeField]
     private bool suppressControllerButtonsOutsideRay = true;
 
     [SerializeField]
     private bool logStateChanges;
 
-    private readonly List<InputDevice> inputDevices = new List<InputDevice>();
-    private readonly List<MetaBinding> bindings = new List<MetaBinding>();
-    private readonly HashSet<Component> boundWrappers = new HashSet<Component>();
-    private readonly HashSet<Component> hoveredWrappers = new HashSet<Component>();
+    [SerializeField]
+    private bool logButtonPresses;
+
+    private static readonly string[] PrimaryButtonControlNames =
+    {
+        "primaryButton",
+        "buttonSouth",
+        "aButton"
+    };
+
+    private static readonly string[] SecondaryButtonControlNames =
+    {
+        "secondaryButton",
+        "buttonNorth",
+        "bButton"
+    };
+
+    private readonly List<InputDevice> legacyInputDevices =
+        new List<InputDevice>();
+
+    private readonly List<MetaBinding> bindings =
+        new List<MetaBinding>();
+
+    private readonly HashSet<Component> boundWrappers =
+        new HashSet<Component>();
+
+    private readonly HashSet<Component> hoveredWrappers =
+        new HashSet<Component>();
+
+    private readonly OvrInputReflectionReader ovrInputReader =
+        new OvrInputReflectionReader();
 
     private FieldInfo previousPrimaryButtonField;
     private FieldInfo previousSecondaryButtonField;
@@ -79,8 +310,12 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
     private bool manualHoverActive;
     private bool reflectionReady;
     private bool reflectionErrorLogged;
+    private bool wasModernPrimaryButtonPressed;
+    private bool wasModernSecondaryButtonPressed;
 
-    public bool IsRayFocused => manualHoverActive || hoveredWrappers.Count > 0;
+    public bool IsRayFocused =>
+        manualHoverActive ||
+        hoveredWrappers.Count > 0;
 
     private void Awake()
     {
@@ -93,9 +328,15 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         ResolveBookController();
         CacheBookControllerMembers();
 
+        wasModernPrimaryButtonPressed = false;
+        wasModernSecondaryButtonPressed = false;
+
         if (autoBindMetaEventWrappers)
         {
-            bindingCoroutine = StartCoroutine(BindMetaWrappersRoutine());
+            bindingCoroutine =
+                StartCoroutine(
+                    BindMetaWrappersRoutine()
+                );
         }
     }
 
@@ -108,36 +349,80 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         }
 
         UnbindMetaEvents();
+
         manualHoverActive = false;
         hoveredWrappers.Clear();
+
+        wasModernPrimaryButtonPressed = false;
+        wasModernSecondaryButtonPressed = false;
     }
 
     private void Update()
     {
-        // BookController の Update より先に実行されます。
-        // Ray 外では「前フレームも現在と同じボタン状態」にして、
-        // BookController 側の押下エッジを発生させません。
-        if (suppressControllerButtonsOutsideRay && !IsRayFocused)
+        /*
+         * 本にRayが当たっていない場合は、既存BookControllerが読む
+         * UnityEngine.XR入力のエッジも発生させません。
+         */
+        if (
+            suppressControllerButtonsOutsideRay &&
+            !IsRayFocused
+        )
         {
             SuppressBookControllerButtonEdges();
         }
+
+        ReadModernControllerButtonEdges(
+            out bool primaryPressedThisFrame,
+            out bool secondaryPressedThisFrame
+        );
+
+        if (!IsRayFocused)
+        {
+            return;
+        }
+
+        if (primaryPressedThisFrame)
+        {
+            if (logButtonPresses)
+            {
+                Debug.Log(
+                    "Meta controller A/X button pressed while Ray is focused.",
+                    this
+                );
+            }
+
+            InvokeBookInput(
+                handleRightInputMethod
+            );
+        }
+        else if (secondaryPressedThisFrame)
+        {
+            if (logButtonPresses)
+            {
+                Debug.Log(
+                    "Meta controller B/Y button pressed while Ray is focused.",
+                    this
+                );
+            }
+
+            InvokeBookInput(
+                handleLeftInputMethod
+            );
+        }
     }
 
-    // Meta XR の When Hover へ Inspector から直接登録することもできます。
     public void OnRayHoverEntered()
     {
         manualHoverActive = true;
         LogFocusChange();
     }
 
-    // Meta XR の When Unhover へ Inspector から直接登録することもできます。
     public void OnRayHoverExited()
     {
         manualHoverActive = false;
         LogFocusChange();
     }
 
-    // Meta XR の When Select へ Inspector から直接登録することもできます。
     public void OnRaySelected()
     {
         ExecuteSelectAction();
@@ -145,12 +430,84 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
 
     public void OnRaySelectNext()
     {
-        InvokeBookInput(handleRightInputMethod);
+        InvokeBookInput(
+            handleRightInputMethod
+        );
     }
 
     public void OnRaySelectPrevious()
     {
-        InvokeBookInput(handleLeftInputMethod);
+        InvokeBookInput(
+            handleLeftInputMethod
+        );
+    }
+
+    [ContextMenu("Log Controller Input Diagnostics")]
+    public void LogControllerInputDiagnostics()
+    {
+#if ENABLE_INPUT_SYSTEM
+        int xrControllerCount = 0;
+
+        foreach (
+            UnityEngine.InputSystem.InputDevice inputDevice
+            in InputSystemApi.devices
+        )
+        {
+            if (!(inputDevice is InputSystemXRController xrController))
+            {
+                continue;
+            }
+
+            xrControllerCount++;
+
+            InputSystemButtonControl primaryControl =
+                FindInputSystemButton(
+                    xrController,
+                    PrimaryButtonControlNames
+                );
+
+            InputSystemButtonControl secondaryControl =
+                FindInputSystemButton(
+                    xrController,
+                    SecondaryButtonControlNames
+                );
+
+            Debug.Log(
+                "Input System XR controller: " +
+                xrController.displayName +
+                " / layout=" +
+                xrController.layout +
+                " / primary=" +
+                (primaryControl != null
+                    ? primaryControl.name
+                    : "not found") +
+                " / secondary=" +
+                (secondaryControl != null
+                    ? secondaryControl.name
+                    : "not found"),
+                this
+            );
+        }
+
+        if (xrControllerCount == 0)
+        {
+            Debug.LogWarning(
+                "Input System上にXRControllerが見つかりません。",
+                this
+            );
+        }
+#else
+        Debug.LogWarning(
+            "ENABLE_INPUT_SYSTEMが無効です。",
+            this
+        );
+#endif
+
+        Debug.Log(
+            "OVRInput reflection available: " +
+            ovrInputReader.IsAvailable,
+            this
+        );
     }
 
     private void ResolveBookController()
@@ -160,14 +517,20 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
             return;
         }
 
-        bookController = GetComponent<BookController>() ??
-                         GetComponentInParent<BookController>();
+        bookController =
+            GetComponent<BookController>() ??
+            GetComponentInParent<BookController>();
 
-        if (bookController == null && !reflectionErrorLogged)
+        if (
+            bookController == null &&
+            !reflectionErrorLogged
+        )
         {
             reflectionErrorLogged = true;
+
             Debug.LogError(
-                "BookRayInteractionBridge から BookController を取得できません。",
+                "BookRayInteractionBridgeからBookControllerを取得できません。" +
+                "別オブジェクトにある場合はInspectorで指定してください。",
                 this
             );
         }
@@ -181,26 +544,52 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         }
 
         Type type = bookController.GetType();
-        const BindingFlags flags = BindingFlags.Instance |
-                                   BindingFlags.Public |
-                                   BindingFlags.NonPublic;
 
-        previousPrimaryButtonField = type.GetField("wasPrimaryButtonPressed", flags);
-        previousSecondaryButtonField = type.GetField("wasSecondaryButtonPressed", flags);
-        handleRightInputMethod = type.GetMethod("HandleRightInput", flags);
-        handleLeftInputMethod = type.GetMethod("HandleLeftInput", flags);
+        const BindingFlags Flags =
+            BindingFlags.Instance |
+            BindingFlags.Public |
+            BindingFlags.NonPublic;
 
-        reflectionReady = previousPrimaryButtonField != null &&
-                          previousSecondaryButtonField != null &&
-                          handleRightInputMethod != null &&
-                          handleLeftInputMethod != null;
+        previousPrimaryButtonField =
+            type.GetField(
+                "wasPrimaryButtonPressed",
+                Flags
+            );
 
-        if (!reflectionReady && !reflectionErrorLogged)
+        previousSecondaryButtonField =
+            type.GetField(
+                "wasSecondaryButtonPressed",
+                Flags
+            );
+
+        handleRightInputMethod =
+            type.GetMethod(
+                "HandleRightInput",
+                Flags
+            );
+
+        handleLeftInputMethod =
+            type.GetMethod(
+                "HandleLeftInput",
+                Flags
+            );
+
+        reflectionReady =
+            previousPrimaryButtonField != null &&
+            previousSecondaryButtonField != null &&
+            handleRightInputMethod != null &&
+            handleLeftInputMethod != null;
+
+        if (
+            !reflectionReady &&
+            !reflectionErrorLogged
+        )
         {
             reflectionErrorLogged = true;
+
             Debug.LogError(
-                "BookController の入力メンバーを取得できません。" +
-                "BookController.cs のメソッド名またはフィールド名が変更されていないか確認してください。",
+                "BookControllerの入力メンバーを取得できません。" +
+                "BookController.csのメソッド名またはフィールド名を確認してください。",
                 this
             );
         }
@@ -208,61 +597,215 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
 
     private void SuppressBookControllerButtonEdges()
     {
-        if (!reflectionReady || bookController == null)
+        if (
+            !reflectionReady ||
+            bookController == null
+        )
         {
             return;
         }
 
-        inputDevices.Clear();
+        legacyInputDevices.Clear();
+
         InputDevices.GetDevicesWithCharacteristics(
             InputDeviceCharacteristics.Controller,
-            inputDevices
+            legacyInputDevices
         );
 
         bool primaryPressed = false;
         bool secondaryPressed = false;
 
-        foreach (InputDevice device in inputDevices)
+        foreach (InputDevice device in legacyInputDevices)
         {
-            if (device.TryGetFeatureValue(CommonUsages.primaryButton, out bool primary) && primary)
+            if (
+                device.TryGetFeatureValue(
+                    CommonUsages.primaryButton,
+                    out bool primary
+                ) &&
+                primary
+            )
             {
                 primaryPressed = true;
             }
 
-            if (device.TryGetFeatureValue(CommonUsages.secondaryButton, out bool secondary) && secondary)
+            if (
+                device.TryGetFeatureValue(
+                    CommonUsages.secondaryButton,
+                    out bool secondary
+                ) &&
+                secondary
+            )
             {
                 secondaryPressed = true;
             }
         }
 
-        previousPrimaryButtonField.SetValue(bookController, primaryPressed);
-        previousSecondaryButtonField.SetValue(bookController, secondaryPressed);
+        previousPrimaryButtonField.SetValue(
+            bookController,
+            primaryPressed
+        );
+
+        previousSecondaryButtonField.SetValue(
+            bookController,
+            secondaryPressed
+        );
     }
+
+    private void ReadModernControllerButtonEdges(
+        out bool primaryPressedThisFrame,
+        out bool secondaryPressedThisFrame
+    )
+    {
+        ReadModernControllerButtonStates(
+            out bool primaryPressed,
+            out bool secondaryPressed
+        );
+
+        primaryPressedThisFrame =
+            primaryPressed &&
+            !wasModernPrimaryButtonPressed;
+
+        secondaryPressedThisFrame =
+            secondaryPressed &&
+            !wasModernSecondaryButtonPressed;
+
+        wasModernPrimaryButtonPressed =
+            primaryPressed;
+
+        wasModernSecondaryButtonPressed =
+            secondaryPressed;
+    }
+
+    private void ReadModernControllerButtonStates(
+        out bool primaryPressed,
+        out bool secondaryPressed
+    )
+    {
+        primaryPressed = false;
+        secondaryPressed = false;
+
+#if ENABLE_INPUT_SYSTEM
+        if (enableInputSystemControllerButtons)
+        {
+            foreach (
+                UnityEngine.InputSystem.InputDevice inputDevice
+                in InputSystemApi.devices
+            )
+            {
+                if (!(inputDevice is InputSystemXRController xrController))
+                {
+                    continue;
+                }
+
+                InputSystemButtonControl primaryControl =
+                    FindInputSystemButton(
+                        xrController,
+                        PrimaryButtonControlNames
+                    );
+
+                InputSystemButtonControl secondaryControl =
+                    FindInputSystemButton(
+                        xrController,
+                        SecondaryButtonControlNames
+                    );
+
+                if (
+                    primaryControl != null &&
+                    primaryControl.isPressed
+                )
+                {
+                    primaryPressed = true;
+                }
+
+                if (
+                    secondaryControl != null &&
+                    secondaryControl.isPressed
+                )
+                {
+                    secondaryPressed = true;
+                }
+            }
+        }
+#endif
+
+        if (
+            enableOvrInputFallback &&
+            ovrInputReader.TryRead(
+                out bool ovrPrimaryPressed,
+                out bool ovrSecondaryPressed
+            )
+        )
+        {
+            primaryPressed |=
+                ovrPrimaryPressed;
+
+            secondaryPressed |=
+                ovrSecondaryPressed;
+        }
+    }
+
+#if ENABLE_INPUT_SYSTEM
+    private static InputSystemButtonControl FindInputSystemButton(
+        InputSystemXRController controller,
+        IReadOnlyList<string> controlNames
+    )
+    {
+        foreach (string controlName in controlNames)
+        {
+            InputSystemButtonControl control =
+                controller.TryGetChildControl<InputSystemButtonControl>(
+                    controlName
+                );
+
+            if (control != null)
+            {
+                return control;
+            }
+        }
+
+        return null;
+    }
+#endif
 
     private IEnumerator BindMetaWrappersRoutine()
     {
-        // Meta XR のバージョンによっては Start 後に UnityEvent が初期化されます。
         yield return null;
 
         while (enabled)
         {
             DiscoverAndBindMetaWrappers();
-            yield return new WaitForSecondsRealtime(Mathf.Max(0.1f, rescanInterval));
+
+            yield return
+                new WaitForSecondsRealtime(
+                    Mathf.Max(
+                        0.1f,
+                        rescanInterval
+                    )
+                );
         }
     }
 
     private void DiscoverAndBindMetaWrappers()
     {
-        Component[] components = GetComponentsInChildren<Component>(true);
+        Component[] components =
+            GetComponentsInChildren<Component>(
+                includeInactive: true
+            );
 
         foreach (Component component in components)
         {
-            if (component == null || boundWrappers.Contains(component))
+            if (
+                component == null ||
+                boundWrappers.Contains(component)
+            )
             {
                 continue;
             }
 
-            if (!IsMetaEventWrapper(component) || !ReferencesRayInteractable(component))
+            if (
+                !IsMetaEventWrapper(component) ||
+                !ReferencesRayInteractable(component)
+            )
             {
                 continue;
             }
@@ -271,41 +814,72 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         }
     }
 
-    private bool TryBindMetaWrapper(Component wrapper)
+    private bool TryBindMetaWrapper(
+        Component wrapper
+    )
     {
-        UnityEvent hover = GetUnityEvent(wrapper, "WhenHover", "_whenHover");
-        UnityEvent unhover = GetUnityEvent(
-            wrapper,
-            "WhenUnhover",
-            "WhenUnHover",
-            "_whenUnhover",
-            "_whenUnHover"
-        );
-        UnityEvent select = GetUnityEvent(wrapper, "WhenSelect", "_whenSelect");
+        UnityEvent hover =
+            GetUnityEvent(
+                wrapper,
+                "WhenHover",
+                "_whenHover"
+            );
+
+        UnityEvent unhover =
+            GetUnityEvent(
+                wrapper,
+                "WhenUnhover",
+                "WhenUnHover",
+                "_whenUnhover",
+                "_whenUnHover"
+            );
+
+        UnityEvent select =
+            GetUnityEvent(
+                wrapper,
+                "WhenSelect",
+                "_whenSelect"
+            );
 
         if (hover == null || unhover == null)
         {
             return false;
         }
 
-        MetaBinding binding = new MetaBinding
+        MetaBinding binding =
+            new MetaBinding
+            {
+                Wrapper = wrapper,
+                Hover = hover,
+                Unhover = unhover,
+                Select = select
+            };
+
+        binding.HoverAction =
+            () => HandleMetaHoverEntered(wrapper);
+
+        binding.UnhoverAction =
+            () => HandleMetaHoverExited(wrapper);
+
+        binding.SelectAction =
+            ExecuteSelectAction;
+
+        hover.AddListener(
+            binding.HoverAction
+        );
+
+        unhover.AddListener(
+            binding.UnhoverAction
+        );
+
+        if (
+            select != null &&
+            selectAction != RaySelectAction.None
+        )
         {
-            Wrapper = wrapper,
-            Hover = hover,
-            Unhover = unhover,
-            Select = select
-        };
-
-        binding.HoverAction = () => HandleMetaHoverEntered(wrapper);
-        binding.UnhoverAction = () => HandleMetaHoverExited(wrapper);
-        binding.SelectAction = ExecuteSelectAction;
-
-        hover.AddListener(binding.HoverAction);
-        unhover.AddListener(binding.UnhoverAction);
-
-        if (select != null && selectAction != RaySelectAction.None)
-        {
-            select.AddListener(binding.SelectAction);
+            select.AddListener(
+                binding.SelectAction
+            );
         }
 
         bindings.Add(binding);
@@ -313,7 +887,11 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
 
         if (logStateChanges)
         {
-            Debug.Log("Meta XR RayInteractable へ接続: " + wrapper.gameObject.name, this);
+            Debug.Log(
+                "Meta XR RayInteractableへ接続: " +
+                wrapper.gameObject.name,
+                this
+            );
         }
 
         return true;
@@ -325,17 +903,23 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         {
             if (binding.Hover != null)
             {
-                binding.Hover.RemoveListener(binding.HoverAction);
+                binding.Hover.RemoveListener(
+                    binding.HoverAction
+                );
             }
 
             if (binding.Unhover != null)
             {
-                binding.Unhover.RemoveListener(binding.UnhoverAction);
+                binding.Unhover.RemoveListener(
+                    binding.UnhoverAction
+                );
             }
 
             if (binding.Select != null)
             {
-                binding.Select.RemoveListener(binding.SelectAction);
+                binding.Select.RemoveListener(
+                    binding.SelectAction
+                );
             }
         }
 
@@ -343,7 +927,9 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         boundWrappers.Clear();
     }
 
-    private void HandleMetaHoverEntered(Component wrapper)
+    private void HandleMetaHoverEntered(
+        Component wrapper
+    )
     {
         if (wrapper != null)
         {
@@ -353,7 +939,9 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         LogFocusChange();
     }
 
-    private void HandleMetaHoverExited(Component wrapper)
+    private void HandleMetaHoverExited(
+        Component wrapper
+    )
     {
         if (wrapper != null)
         {
@@ -368,15 +956,22 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         switch (selectAction)
         {
             case RaySelectAction.NextOrOpen:
-                InvokeBookInput(handleRightInputMethod);
+                InvokeBookInput(
+                    handleRightInputMethod
+                );
                 break;
+
             case RaySelectAction.PreviousOrClose:
-                InvokeBookInput(handleLeftInputMethod);
+                InvokeBookInput(
+                    handleLeftInputMethod
+                );
                 break;
         }
     }
 
-    private void InvokeBookInput(MethodInfo method)
+    private void InvokeBookInput(
+        MethodInfo method
+    )
     {
         if (bookController == null)
         {
@@ -384,20 +979,27 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
             CacheBookControllerMembers();
         }
 
-        if (bookController == null || method == null)
+        if (
+            bookController == null ||
+            method == null
+        )
         {
             return;
         }
 
-        // Select は Ray が対象へ当たった結果として発火するため、
-        // Hover -> Select の状態遷移で Unhover が先に来ても操作を許可します。
         try
         {
-            method.Invoke(bookController, null);
+            method.Invoke(
+                bookController,
+                null
+            );
         }
         catch (TargetInvocationException exception)
         {
-            Debug.LogException(exception.InnerException ?? exception, this);
+            Debug.LogException(
+                exception.InnerException ?? exception,
+                this
+            );
         }
     }
 
@@ -409,21 +1011,36 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         }
 
         Debug.Log(
-            IsRayFocused ? "Ray が本に入りました。" : "Ray が本から外れました。",
+            IsRayFocused
+                ? "Rayが本に入りました。"
+                : "Rayが本から外れました。",
             this
         );
     }
 
-    private static bool IsMetaEventWrapper(Component component)
+    private static bool IsMetaEventWrapper(
+        Component component
+    )
     {
         Type type = component.GetType();
-        return type.Name == "InteractableUnityEventWrapper" ||
-               type.FullName == "Oculus.Interaction.InteractableUnityEventWrapper";
+
+        return
+            type.Name ==
+            "InteractableUnityEventWrapper" ||
+            type.FullName ==
+            "Oculus.Interaction.InteractableUnityEventWrapper";
     }
 
-    private static bool ReferencesRayInteractable(Component wrapper)
+    private static bool ReferencesRayInteractable(
+        Component wrapper
+    )
     {
-        object interactable = GetMemberValue(wrapper, "InteractableView", "_interactableView");
+        object interactable =
+            GetMemberValue(
+                wrapper,
+                "InteractableView",
+                "_interactableView"
+            );
 
         if (interactable == null)
         {
@@ -431,17 +1048,34 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         }
 
         Type type = interactable.GetType();
-        return type.Name == "RayInteractable" ||
-               (type.FullName != null &&
-                type.FullName.EndsWith(".RayInteractable", StringComparison.Ordinal));
+
+        return
+            type.Name == "RayInteractable" ||
+            (
+                type.FullName != null &&
+                type.FullName.EndsWith(
+                    ".RayInteractable",
+                    StringComparison.Ordinal
+                )
+            );
     }
 
-    private static UnityEvent GetUnityEvent(Component component, params string[] names)
+    private static UnityEvent GetUnityEvent(
+        Component component,
+        params string[] names
+    )
     {
-        return GetMemberValue(component, names) as UnityEvent;
+        return
+            GetMemberValue(
+                component,
+                names
+            ) as UnityEvent;
     }
 
-    private static object GetMemberValue(object target, params string[] names)
+    private static object GetMemberValue(
+        object target,
+        params string[] names
+    )
     {
         if (target == null)
         {
@@ -449,14 +1083,24 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
         }
 
         Type type = target.GetType();
-        const BindingFlags flags = BindingFlags.Instance |
-                                   BindingFlags.Public |
-                                   BindingFlags.NonPublic;
+
+        const BindingFlags Flags =
+            BindingFlags.Instance |
+            BindingFlags.Public |
+            BindingFlags.NonPublic;
 
         foreach (string name in names)
         {
-            PropertyInfo property = type.GetProperty(name, flags);
-            if (property != null && property.GetIndexParameters().Length == 0)
+            PropertyInfo property =
+                type.GetProperty(
+                    name,
+                    Flags
+                );
+
+            if (
+                property != null &&
+                property.GetIndexParameters().Length == 0
+            )
             {
                 try
                 {
@@ -468,7 +1112,12 @@ public sealed class BookRayInteractionBridge : MonoBehaviour
                 }
             }
 
-            FieldInfo field = type.GetField(name, flags);
+            FieldInfo field =
+                type.GetField(
+                    name,
+                    Flags
+                );
+
             if (field != null)
             {
                 try
