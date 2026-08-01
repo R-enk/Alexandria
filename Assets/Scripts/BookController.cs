@@ -10,6 +10,10 @@ using UnityEngine;
 using UnityEngine.XR;
 using VersOne.Epub;
 
+#if ENABLE_INPUT_SYSTEM
+using InputSystemKeyboard = UnityEngine.InputSystem.Keyboard;
+#endif
+
 public sealed class BookController : MonoBehaviour
 {
     private const int PagesPerSpread = 2;
@@ -212,11 +216,11 @@ public sealed class BookController : MonoBehaviour
         }
 
         bool moveRight =
-            Input.GetKeyDown(KeyCode.RightArrow) ||
+            IsRightArrowPressedThisFrame() ||
             primaryPressedThisFrame;
 
         bool moveLeft =
-            Input.GetKeyDown(KeyCode.LeftArrow) ||
+            IsLeftArrowPressedThisFrame() ||
             secondaryPressedThisFrame;
 
         if (moveRight)
@@ -227,6 +231,36 @@ public sealed class BookController : MonoBehaviour
         {
             HandleLeftInput();
         }
+    }
+
+    private static bool IsRightArrowPressedThisFrame()
+    {
+#if ENABLE_INPUT_SYSTEM
+        return
+            InputSystemKeyboard.current != null &&
+            InputSystemKeyboard.current
+                .rightArrowKey
+                .wasPressedThisFrame;
+#elif ENABLE_LEGACY_INPUT_MANAGER
+        return Input.GetKeyDown(KeyCode.RightArrow);
+#else
+        return false;
+#endif
+    }
+
+    private static bool IsLeftArrowPressedThisFrame()
+    {
+#if ENABLE_INPUT_SYSTEM
+        return
+            InputSystemKeyboard.current != null &&
+            InputSystemKeyboard.current
+                .leftArrowKey
+                .wasPressedThisFrame;
+#elif ENABLE_LEGACY_INPUT_MANAGER
+        return Input.GetKeyDown(KeyCode.LeftArrow);
+#else
+        return false;
+#endif
     }
 
     private bool ValidateReferences()
